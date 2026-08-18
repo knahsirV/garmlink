@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "garmin-mcp"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "garminconnect>=0.3.2",
+    "fastmcp>=2.0",
+    "python-dotenv>=1.0",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+garmin-mcp = "garmin_mcp.server:main"
+garmin-mcp-auth = "garmin_mcp.auth:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/garmin_mcp"]
