@@ -16,6 +16,16 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .client import GarminClient
+from .tools.daily import mcp as daily_mcp
+from .tools.activities import mcp as activities_mcp
+from .tools.training import mcp as training_mcp
+from .tools.running import mcp as running_mcp
+from .tools.cycling import mcp as cycling_mcp
+from .tools.swimming import mcp as swimming_mcp
+from .tools.strength import mcp as strength_mcp
+from .tools.workouts import mcp as workouts_mcp
+from .tools.profile import mcp as profile_mcp
+from .tools.insights import mcp as insights_mcp
 
 load_dotenv()
 
@@ -96,6 +106,18 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP("garmin-mcp", lifespan=lifespan)
+
+# Mount all tool sub-servers onto the main app.
+mcp.mount(daily_mcp)
+mcp.mount(activities_mcp)
+mcp.mount(training_mcp)
+mcp.mount(running_mcp)
+mcp.mount(cycling_mcp)
+mcp.mount(swimming_mcp)
+mcp.mount(strength_mcp)
+mcp.mount(workouts_mcp)
+mcp.mount(profile_mcp)
+mcp.mount(insights_mcp)
 
 
 # ---------------------------------------------------------------------------
