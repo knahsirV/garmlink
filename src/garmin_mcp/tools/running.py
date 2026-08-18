@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastmcp import Context, FastMCP
 
 from ..cache import HEALTH_TTL
-from ..server import get_garmin
+from ..deps import get_garmin
 
 mcp = FastMCP("running")
 

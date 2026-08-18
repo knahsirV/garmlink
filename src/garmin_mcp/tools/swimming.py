@@ -7,7 +7,7 @@ import asyncio
 from fastmcp import Context, FastMCP
 
 from ..cache import ACTIVITY_TTL
-from ..server import get_garmin
+from ..deps import get_garmin
 
 mcp = FastMCP("swimming")
 

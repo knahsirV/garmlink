@@ -130,15 +130,6 @@ async def health(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Context helper (used by tool modules)
-# ---------------------------------------------------------------------------
-
-def get_garmin(ctx) -> GarminClient:
-    """Return the shared GarminClient from the request lifespan context."""
-    return ctx.lifespan_context["garmin"]
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
