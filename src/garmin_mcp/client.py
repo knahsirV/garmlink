@@ -53,6 +53,11 @@ class GarminClient:
             api.login()
         self._api = api
 
+    def close(self) -> None:
+        """Shut down the executor and clear the cache."""
+        self._executor.shutdown(wait=True)
+        self._cache.clear()
+
     async def call(
         self, method_name: str, *args: Any, ttl: float = HEALTH_TTL, **kwargs: Any
     ) -> Any:
@@ -65,16 +70,21 @@ class GarminClient:
         4. Store result in cache with ttl.
         5. Return result.
         """
-        cache_key = (method_name, args, frozenset(kwargs.items()))
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached
+        try:
+            cache_key = (method_name, args, frozenset(kwargs.items()))
+        except TypeError:
+            cache_key = None  # skip cache for unhashable kwargs
+
+        if cache_key is not None and self._cache.contains(cache_key):
+            return self._cache.get(cache_key)
 
         if self._api is None:
             raise RuntimeError("GarminClient.authenticate() must be called before call()")
 
-        method_fn = getattr(self._api, method_name)
-        loop = asyncio.get_event_loop()
+        method_fn = getattr(self._api, method_name, None)
+        if method_fn is None or not callable(method_fn):
+            raise ValueError(f"Unknown Garmin API method: {method_name!r}")
+        loop = asyncio.get_running_loop()
 
         last_exc: GarminConnectTooManyRequestsError | None = None
         for attempt in range(_MAX_RETRIES + 1):

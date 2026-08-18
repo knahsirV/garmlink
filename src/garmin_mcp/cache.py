@@ -39,6 +39,18 @@ class TTLCache:
         with self._lock:
             self._store[key] = (value, expires_at)
 
+    def contains(self, key: CacheKey) -> bool:
+        """Return True if key exists in cache and has not expired."""
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return False
+            _, expires_at = entry
+            if time.monotonic() >= expires_at:
+                del self._store[key]
+                return False
+            return True
+
     def invalidate(self, method_name: str) -> None:
         """Remove all entries whose key starts with the given method name."""
         with self._lock:
