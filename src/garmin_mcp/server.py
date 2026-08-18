@@ -57,16 +57,22 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
     """Initialise the GarminClient and expose it via the lifespan context."""
-    email = os.environ["GARMIN_EMAIL"]
+    email = os.getenv("GARMIN_EMAIL", "")
+    if not email:
+        raise RuntimeError("GARMIN_EMAIL environment variable is required")
     password = os.getenv("GARMIN_PASSWORD", "")
 
     tokens_b64 = os.getenv("GARMIN_TOKENS_JSON", "")
     if tokens_b64:
         # Production: tokens are base64-encoded and stored in an env var.
         token_dir = Path("/tmp/garmin_tokens")
-        token_dir.mkdir(parents=True, exist_ok=True)
+        token_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         token_file = token_dir / "garmin_tokens.json"
-        token_file.write_bytes(base64.b64decode(tokens_b64))
+        try:
+            token_data = base64.b64decode(tokens_b64)
+        except Exception as e:
+            raise RuntimeError(f"GARMIN_TOKENS_JSON is not valid base64: {e}") from e
+        token_file.write_bytes(token_data)
         tokenstore = str(token_dir)
     else:
         # Local dev: read tokens from the default garminconnect directory.
