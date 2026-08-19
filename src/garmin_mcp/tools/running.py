@@ -31,13 +31,19 @@ async def get_lactate_threshold(ctx: Context) -> dict:
 
 
 @mcp.tool()
-async def get_running_tolerance(ctx: Context) -> dict:
+async def get_running_tolerance(start_date: str, end_date: str, ctx: Context) -> list:
     """
     Use when user asks about running readiness, injury risk, or whether they can handle more run volume.
-    Returns: Garmin's running load tolerance / injury risk assessment.
+    Returns: Garmin's running load tolerance / injury risk assessment per week in the range.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format (inclusive).
+        end_date:   End date in YYYY-MM-DD format (inclusive).
     """
     client = get_garmin(ctx)
-    return await client.call("get_running_tolerance", ttl=HEALTH_TTL)
+    return await client.call(
+        "get_running_tolerance", start_date, end_date, ttl=HEALTH_TTL
+    )
 
 
 @mcp.tool()

@@ -21,16 +21,22 @@ class TTLCache:
         self._store: dict[CacheKey, tuple[Any, float]] = {}
         self._lock = threading.Lock()
 
-    def get(self, key: CacheKey) -> Any | None:
-        """Return cached value if not expired, else None."""
+    def get(self, key: CacheKey, default: Any = None) -> Any:
+        """Return the cached value if present and unexpired, else `default`.
+
+        Callers that need to distinguish "cached None" from "no entry" should
+        pass a unique sentinel as `default`. Lookup and expiry happen under a
+        single lock acquisition, so an entry cannot expire between the check
+        and the read.
+        """
         with self._lock:
             entry = self._store.get(key)
             if entry is None:
-                return None
+                return default
             value, expires_at = entry
             if time.monotonic() >= expires_at:
                 del self._store[key]
-                return None
+                return default
             return value
 
     def set(self, key: CacheKey, value: Any, ttl: float) -> None:

@@ -10,6 +10,7 @@ from fastmcp import Context, FastMCP
 
 from ..cache import ACTIVITY_TTL, HEALTH_TTL
 from ..deps import get_garmin
+from ..ranges import MAX_RANGE_CONCURRENCY, build_date_list, fetch_per_day
 
 mcp = FastMCP("insights")
 
@@ -56,16 +57,21 @@ async def get_training_overview(date_str: str, ctx: Context) -> dict:
     """
     client = get_garmin(ctx)
 
+    # Load balance lives inside the training-status payload; Garmin has no
+    # separate load-trend endpoint.
     load, readiness, activities = await asyncio.gather(
-        client.call("get_training_load_trend", date_str, ttl=HEALTH_TTL),
+        client.call("get_training_status", date_str, ttl=HEALTH_TTL),
         client.call("get_training_readiness", date_str, ttl=HEALTH_TTL),
         client.call("get_activities", 0, 20, ttl=ACTIVITY_TTL),
+        return_exceptions=True,
     )
     return {
         "date": date_str,
-        "training_load": load,
-        "readiness": readiness,
-        "recent_activities": activities,
+        "training_load": None if isinstance(load, BaseException) else load,
+        "readiness": None if isinstance(readiness, BaseException) else readiness,
+        "recent_activities": (
+            None if isinstance(activities, BaseException) else activities
+        ),
     }
 
 
@@ -81,7 +87,7 @@ async def get_metric_trend(
     Use when user asks how a metric has changed over time (e.g. 'how has my HRV trended this month?').
 
     Args:
-        metric: One of 'steps', 'sleep_score', 'hrv', 'body_battery', 'stress', 'heart_rate'
+        metric: One of 'steps', 'sleep_score', 'hrv', 'stress', 'heart_rate'
         start_date: Start of the date range in YYYY-MM-DD format.
         end_date: End of the date range in YYYY-MM-DD format.
 
@@ -101,12 +107,21 @@ async def get_metric_trend(
         return {"error": f"Unknown metric '{metric}'. Choose from: {list(method_map.keys())}"}
 
     method_name, _ = method_map[metric]
-    start = date.fromisoformat(start_date)
-    end = date.fromisoformat(end_date)
-    dates = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+    try:
+        dates = build_date_list(start_date, end_date)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    # Bound concurrency: the client's thread pool is small, and an unbounded
+    # fan-out trips Garmin's rate limiter into a retry storm.
+    semaphore = asyncio.Semaphore(MAX_RANGE_CONCURRENCY)
+
+    async def one(day: str):
+        async with semaphore:
+            return await client.call(method_name, day, ttl=HEALTH_TTL)
 
     results = await asyncio.gather(
-        *[client.call(method_name, d, ttl=HEALTH_TTL) for d in dates],
+        *[one(d) for d in dates],
         return_exceptions=True,
     )
 
@@ -229,7 +244,9 @@ async def get_triathlon_fitness_snapshot(ctx: Context) -> dict:
         client.call("get_race_predictions", ttl=HEALTH_TTL),
         client.call("get_cycling_ftp", ttl=HEALTH_TTL),
         client.call("get_activities_by_date", thirty_days_ago, today, "lap_swimming", ttl=ACTIVITY_TTL),
-        client.call("get_max_metrics_range", thirty_days_ago, today, ttl=HEALTH_TTL),
+        fetch_per_day(
+            client, "get_max_metrics", thirty_days_ago, today, ttl=HEALTH_TTL
+        ),
         return_exceptions=True,
     )
 

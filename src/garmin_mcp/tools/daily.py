@@ -53,7 +53,7 @@ async def get_heart_rates(date: str, ctx: Context) -> dict:
 
 
 @mcp.tool()
-async def get_body_battery(start_date: str, end_date: str, ctx: Context) -> dict:
+async def get_body_battery(start_date: str, end_date: str, ctx: Context) -> list:
     """
     Return Body Battery energy levels over a date range.  Body Battery
     reflects energy reserves based on stress, sleep, and activity.  Use this
@@ -84,7 +84,7 @@ async def get_stress_data(date: str, ctx: Context) -> dict:
 
 
 @mcp.tool()
-async def get_steps_data(date: str, ctx: Context) -> dict:
+async def get_steps_data(date: str, ctx: Context) -> list:
     """
     Return step-count data broken down by time of day for the given date,
     including total steps, goal, and distance.  Use this when the user asks

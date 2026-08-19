@@ -11,26 +11,13 @@ mcp = FastMCP("cycling")
 
 
 @mcp.tool()
-async def get_cycling_ftp(ctx: Context) -> dict:
+async def get_cycling_ftp(ctx: Context) -> dict | list:
     """
     Use when user asks about their FTP (functional threshold power) or cycling power capacity.
     Returns: Current FTP value from Garmin.
     """
     client = get_garmin(ctx)
     return await client.call("get_cycling_ftp", ttl=HEALTH_TTL)
-
-
-@mcp.tool()
-async def get_ftp_history(start_date: str, end_date: str, ctx: Context) -> dict:
-    """
-    Use when user asks how their FTP has changed over time or about FTP trends.
-
-    Args:
-        start_date: Start date in YYYY-MM-DD format (inclusive).
-        end_date:   End date in YYYY-MM-DD format (inclusive).
-    """
-    client = get_garmin(ctx)
-    return await client.call("get_functional_threshold_power_range", start_date, end_date, ttl=HEALTH_TTL)
 
 
 @mcp.tool()
@@ -42,10 +29,14 @@ async def get_cycling_power_zones(ctx: Context) -> dict:
     """
     client = get_garmin(ctx)
     ftp_data = await client.call("get_cycling_ftp", ttl=HEALTH_TTL)
-    # Extract FTP value — garminconnect returns it in different shapes
+    # Extract FTP value — garminconnect returns either a dict or a list of
+    # per-device entries, so normalise before reading the value.
+    record = ftp_data
+    if isinstance(record, list):
+        record = record[0] if record else None
     ftp = None
-    if isinstance(ftp_data, dict):
-        ftp = ftp_data.get("functionalThresholdPower") or ftp_data.get("ftp") or ftp_data.get("value")
+    if isinstance(record, dict):
+        ftp = record.get("functionalThresholdPower") or record.get("ftp") or record.get("value")
     if not ftp:
         return {"error": "Could not determine FTP from Garmin data", "raw": ftp_data}
     zones = [

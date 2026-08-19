@@ -95,5 +95,7 @@ Run these slash commands from this project directory in Claude Code:
 |---|---|
 | `GARMIN_EMAIL` | Your Garmin Connect email |
 | `GARMIN_TOKENS_JSON` | Base64-encoded token file (from `garmin-mcp-auth`) |
-| `MCP_AUTH_TOKEN` | Bearer token protecting the MCP endpoint |
+| `MCP_AUTH_TOKEN` | **Required.** Bearer token protecting the MCP endpoint; must be at least 32 characters. The server refuses to start without it. |
+| `GARMIN_PASSWORD` | Optional. Only used to re-authenticate if the stored tokens expire. |
+| `ALLOW_UNAUTHENTICATED` | Set to `1` to run with no authentication. Localhost development only — never on a public address. |
 | `PORT` | Server port (default: 8000, set automatically by Fly.io) |

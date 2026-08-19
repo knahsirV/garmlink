@@ -13,7 +13,7 @@ mcp = FastMCP("swimming")
 
 
 @mcp.tool()
-async def get_swim_activities(start_date: str, end_date: str, ctx: Context) -> dict:
+async def get_swim_activities(start_date: str, end_date: str, ctx: Context) -> list:
     """
     Use when user asks about swim sessions or swim history. Returns swim sessions with SWOLF, pace, stroke rate.
 

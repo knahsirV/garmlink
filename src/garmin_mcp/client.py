@@ -48,13 +48,22 @@ class GarminClient:
         api.login(self._tokenstore_path)
         self._api = api
 
+    def invalidate(self, method_name: str) -> None:
+        """Drop every cached entry for the given garminconnect method."""
+        self._cache.invalidate(method_name)
+
     def close(self) -> None:
         """Shut down the executor and clear the cache."""
         self._executor.shutdown(wait=True)
         self._cache.clear()
 
     async def call(
-        self, method_name: str, *args: Any, ttl: float = HEALTH_TTL, **kwargs: Any
+        self,
+        method_name: str,
+        *args: Any,
+        ttl: float = HEALTH_TTL,
+        cache: bool = True,
+        **kwargs: Any,
     ) -> Any:
         """Call a garminconnect method with caching and rate-limit retry.
 
@@ -64,14 +73,31 @@ class GarminClient:
            retry up to 3 times (~1 s, ~2 s, ~4 s).
         4. Store result in cache with ttl.
         5. Return result.
-        """
-        try:
-            cache_key = (method_name, args, frozenset(kwargs.items()))
-        except TypeError:
-            cache_key = None  # skip cache for unhashable kwargs
 
-        if cache_key is not None and self._cache.contains(cache_key):
-            return self._cache.get(cache_key)
+        Args:
+            cache: Set False for mutating calls (uploads, renames, scheduling).
+                Writes must never be served from — or stored in — the read cache,
+                otherwise a repeated write returns the first call's response
+                without the write actually happening.
+        """
+        cache_key = None
+        if cache:
+            try:
+                candidate = (method_name, args, frozenset(kwargs.items()))
+                # Build AND hash here: constructing the tuple never hashes its
+                # members, so an unhashable arg (e.g. a workout dict) would
+                # otherwise only blow up later, inside the cache lookup.
+                hash(candidate)
+            except TypeError:
+                cache_key = None  # unhashable argument — skip the cache
+            else:
+                cache_key = candidate
+
+        if cache_key is not None:
+            sentinel = object()
+            hit = self._cache.get(cache_key, default=sentinel)
+            if hit is not sentinel:
+                return hit
 
         if self._api is None:
             raise RuntimeError("GarminClient.authenticate() must be called before call()")
@@ -91,14 +117,13 @@ class GarminClient:
                 result = await loop.run_in_executor(
                     self._executor, partial(method_fn, *args, **kwargs)
                 )
-                self._cache.set(cache_key, result, ttl)
+                if cache_key is not None:
+                    self._cache.set(cache_key, result, ttl)
                 return result
             except GarminConnectTooManyRequestsError as exc:
                 last_exc = exc
                 if attempt == _MAX_RETRIES:
                     raise
-            except Exception:
-                raise
 
         # Should never reach here, but satisfy type checker.
         raise last_exc  # type: ignore[misc]

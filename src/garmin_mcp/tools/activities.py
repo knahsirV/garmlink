@@ -11,7 +11,7 @@ mcp = FastMCP("garmin-activities")
 
 
 @mcp.tool()
-async def get_activities(ctx: Context, limit: int = 10, start: int = 0) -> dict:
+async def get_activities(ctx: Context, limit: int = 10, start: int = 0) -> dict | list:
     """
     Return a paginated list of recent activities (runs, rides, swims, etc.)
     with summary metrics such as distance, duration, pace, and heart rate.
@@ -67,8 +67,8 @@ async def set_activity_name(activity_id: int, name: str, ctx: Context) -> dict:
         name:        New display name for the activity.
     """
     client = get_garmin(ctx)
-    result = await client.call("set_activity_name", activity_id, name)
-    client._cache.invalidate("get_activities")
+    result = await client.call("set_activity_name", activity_id, name, cache=False)
+    client.invalidate("get_activities")
     return result
 
 
@@ -80,6 +80,7 @@ async def create_manual_activity(
     duration_seconds: int,
     ctx: Context,
     distance_meters: float | None = None,
+    timezone: str = "UTC",
 ) -> dict:
     """
     Create a manual (non-device) activity on Garmin Connect.  Use this when
@@ -94,14 +95,24 @@ async def create_manual_activity(
                           (YYYY-MM-DDTHH:MM:SS).
         duration_seconds: Duration of the activity in seconds.
         distance_meters:  Optional distance in metres.
+        timezone:         IANA timezone name for start_time (e.g.
+                          "America/Chicago"). Defaults to UTC.
     """
     client = get_garmin(ctx)
-    return await client.call(
+    # garminconnect wants (start_datetime, time_zone, type_key, distance_km,
+    # duration_min, activity_name) — kilometres and minutes, not metres and
+    # seconds.
+    distance_km = (distance_meters or 0) / 1000
+    duration_min = round(duration_seconds / 60)
+    result = await client.call(
         "create_manual_activity",
-        name,
-        activity_type,
         start_time,
-        duration_seconds,
-        distance_meters,
-        ttl=ACTIVITY_TTL,
+        timezone,
+        activity_type,
+        distance_km,
+        duration_min,
+        name,
+        cache=False,
     )
+    client.invalidate("get_activities")
+    return result

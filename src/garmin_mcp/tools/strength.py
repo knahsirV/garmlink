@@ -11,7 +11,7 @@ mcp = FastMCP("strength")
 
 
 @mcp.tool()
-async def get_strength_activities(start_date: str, end_date: str, ctx: Context) -> dict:
+async def get_strength_activities(start_date: str, end_date: str, ctx: Context) -> list:
     """
     Use when user asks about strength or weight training sessions.
 

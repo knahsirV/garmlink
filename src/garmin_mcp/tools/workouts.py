@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastmcp import Context, FastMCP
 
 from ..cache import ACTIVITY_TTL
@@ -11,17 +13,31 @@ mcp = FastMCP("workouts")
 
 
 @mcp.tool()
-async def get_workouts(ctx: Context) -> dict:
+async def get_workouts(ctx: Context) -> list:
     """List all saved workouts in Garmin Connect. Use when user asks about their workout library."""
     client = get_garmin(ctx)
     return await client.call("get_workouts", ttl=ACTIVITY_TTL)
 
 
 @mcp.tool()
-async def get_scheduled_workouts(ctx: Context) -> dict:
-    """List upcoming scheduled workouts on the Garmin calendar. Use when user asks about their planned training."""
+async def get_scheduled_workouts(
+    ctx: Context, year: int | None = None, month: int | None = None
+) -> dict:
+    """
+    List scheduled workouts on the Garmin calendar for one month.
+    Use when user asks about their planned training.
+
+    Args:
+        year:  Four-digit year. Defaults to the current year.
+        month: Month number 1-12. Defaults to the current month.
+    """
     client = get_garmin(ctx)
-    return await client.call("get_scheduled_workouts", ttl=ACTIVITY_TTL)
+    today = date.today()
+    year = year or today.year
+    month = month or today.month
+    if not 1 <= month <= 12:
+        return {"error": f"month must be between 1 and 12 (got {month})"}
+    return await client.call("get_scheduled_workouts", year, month, ttl=ACTIVITY_TTL)
 
 
 @mcp.tool()
@@ -34,8 +50,10 @@ async def schedule_workout(workout_id: int, scheduled_date: str, ctx: Context) -
         scheduled_date: Date to schedule the workout in YYYY-MM-DD format.
     """
     client = get_garmin(ctx)
-    result = await client.call("schedule_workout", workout_id, scheduled_date)
-    client._cache.invalidate("get_scheduled_workouts")
+    result = await client.call(
+        "schedule_workout", workout_id, scheduled_date, cache=False
+    )
+    client.invalidate("get_scheduled_workouts")
     return result
 
 
@@ -48,8 +66,8 @@ async def upload_workout(workout: dict, ctx: Context) -> dict:
         workout: The workout object as a dict in Garmin Connect format.
     """
     client = get_garmin(ctx)
-    result = await client.call("upload_workout", workout)
-    client._cache.invalidate("get_workouts")
+    result = await client.call("upload_workout", workout, cache=False)
+    client.invalidate("get_workouts")
     return result
 
 
@@ -136,6 +154,6 @@ async def create_workout(
         }],
     }
 
-    result = await client.call("upload_workout", workout_obj, ttl=ACTIVITY_TTL)
-    client._cache.invalidate("get_workouts")
+    result = await client.call("upload_workout", workout_obj, cache=False)
+    client.invalidate("get_workouts")
     return result

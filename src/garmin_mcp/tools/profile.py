@@ -18,7 +18,7 @@ async def get_user_profile(ctx: Context) -> dict:
 
 
 @mcp.tool()
-async def get_devices(ctx: Context) -> dict:
+async def get_devices(ctx: Context) -> list:
     """List connected Garmin devices. Use when user asks about their watch or device."""
     client = get_garmin(ctx)
     return await client.call("get_devices", ttl=STATIC_TTL)

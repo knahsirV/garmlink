@@ -6,3 +6,6 @@ dist/
 build/
 .venv/
 venv/
+
+# Local git worktrees created by Claude Code
+.claude/worktrees/

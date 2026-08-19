@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,15 +34,21 @@ load_dotenv()
 # Bearer-auth HTTP middleware
 # ---------------------------------------------------------------------------
 
+MIN_TOKEN_LENGTH = 32
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Reject requests that don't carry the expected bearer token.
 
-    When MCP_AUTH_TOKEN is empty / not set the middleware is a no-op so that
-    local development works without any configuration.
+    The token is required: `resolve_auth_token()` refuses to start the server
+    without one, so this middleware never runs in an open mode. Only /health is
+    exempt, so Fly's health check works without credentials.
     """
 
     def __init__(self, app, token: str) -> None:
         super().__init__(app)
+        if not token:
+            raise RuntimeError("BearerAuthMiddleware requires a non-empty token")
         self._token = token
 
     async def dispatch(self, request: Request, call_next):
@@ -49,15 +56,41 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/health":
             return await call_next(request)
 
-        # If no token is configured, skip auth (local-dev mode).
-        if not self._token:
-            return await call_next(request)
-
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != self._token:
+        # compare_digest keeps the comparison time independent of how many
+        # leading bytes the presented token got right.
+        if not auth.startswith("Bearer ") or not hmac.compare_digest(
+            auth[7:], self._token
+        ):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
         return await call_next(request)
+
+
+def resolve_auth_token() -> str | None:
+    """Return the bearer token, or None when explicitly running unauthenticated.
+
+    Fails closed: a missing or too-short MCP_AUTH_TOKEN aborts startup rather
+    than silently serving personal health data to anyone who finds the URL.
+    Local development can opt out with ALLOW_UNAUTHENTICATED=1, which is loud
+    and deliberate.
+    """
+    token = os.getenv("MCP_AUTH_TOKEN", "").strip()
+    if not token:
+        if os.getenv("ALLOW_UNAUTHENTICATED") == "1":
+            return None
+        raise RuntimeError(
+            "MCP_AUTH_TOKEN is required. Generate one with "
+            "`python -c 'import secrets; print(secrets.token_urlsafe(32))'` and set it "
+            "(Fly: `flyctl secrets set MCP_AUTH_TOKEN=...`). "
+            "To run without auth on localhost, set ALLOW_UNAUTHENTICATED=1."
+        )
+    if len(token) < MIN_TOKEN_LENGTH:
+        raise RuntimeError(
+            f"MCP_AUTH_TOKEN must be at least {MIN_TOKEN_LENGTH} characters "
+            f"(got {len(token)})."
+        )
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +170,17 @@ def main() -> None:
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
-    auth_token = os.getenv("MCP_AUTH_TOKEN", "")
+    auth_token = resolve_auth_token()
 
-    middleware = [Middleware(BearerAuthMiddleware, token=auth_token)]
+    if auth_token is None:
+        print(
+            "WARNING: ALLOW_UNAUTHENTICATED=1 — serving with NO authentication. "
+            "Never do this on a public address.",
+            flush=True,
+        )
+        middleware = []
+    else:
+        middleware = [Middleware(BearerAuthMiddleware, token=auth_token)]
     http_app = mcp.http_app(middleware=middleware)
 
     uvicorn.run(http_app, host="0.0.0.0", port=port)
