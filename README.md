@@ -47,7 +47,7 @@ Prerequisites: [flyctl](https://fly.io/docs/flyctl/install/) installed and authe
 
 4. Verify:
    ```bash
-   curl https://garmin-mcp.fly.dev/health
+   curl https://garmlink.fly.dev/health
    ```
    Expected: `{"status":"ok"}`
 
@@ -69,7 +69,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "garmin": {
-      "url": "https://garmin-mcp.fly.dev/mcp",
+      "url": "https://garmlink.fly.dev/mcp",
       "headers": { "Authorization": "Bearer <MCP_AUTH_TOKEN>" }
     }
   }

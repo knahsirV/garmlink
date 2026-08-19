@@ -1,4 +1,4 @@
-app = "garmin-mcp"
+app = "garmlink"
 primary_region = "ord"
 
 [build]
