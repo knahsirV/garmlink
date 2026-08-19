@@ -10,7 +10,6 @@ from typing import Any
 
 from garminconnect import (
     Garmin,
-    GarminConnectAuthenticationError,
     GarminConnectTooManyRequestsError,
 )
 
@@ -45,12 +44,8 @@ class GarminClient:
             is_cn=False,
             prompt_mfa=None,
             return_on_mfa=False,
-            tokenstore=self._tokenstore_path,
         )
-        try:
-            api.login(self._tokenstore_path)
-        except (FileNotFoundError, GarminConnectAuthenticationError):
-            api.login()
+        api.login(self._tokenstore_path)
         self._api = api
 
     def close(self) -> None:
