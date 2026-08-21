@@ -30,6 +30,10 @@ from .tools.insights import mcp as insights_mcp
 
 load_dotenv()
 
+# Set by the lifespan so the /readyz route can reach the client. The server
+# runs a single GarminClient per process, so one module-level handle is enough.
+_client: GarminClient | None = None
+
 # ---------------------------------------------------------------------------
 # Bearer-auth HTTP middleware
 # ---------------------------------------------------------------------------
@@ -126,11 +130,19 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
         password=password,
         tokenstore_path=tokenstore,
     )
-    client.authenticate()
+    # Deliberately NOT authenticating here. The service scales to zero, so a
+    # Garmin round-trip in the startup path is paid on every cold start and a
+    # Garmin outage would fail the deploy. The client authenticates on first
+    # use and re-authenticates itself when a session dies; /readyz reports
+    # where it stands. Config that can be checked without the network (email
+    # present, tokens decodable) is still validated above.
+    global _client
+    _client = client
 
     try:
         yield {"garmin": client}
     finally:
+        _client = None
         client.close()
 
 
@@ -159,7 +171,29 @@ mcp.mount(insights_mcp)
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
+    """Liveness only — deliberately does not touch Garmin.
+
+    This is the one route the auth middleware lets through, and nothing about
+    Garmin's availability should be able to make the platform cycle the
+    container. For Garmin session state, use /readyz.
+    """
     return JSONResponse({"status": "ok"})
+
+
+@mcp.custom_route("/readyz", methods=["GET"])
+async def readyz(request: Request) -> JSONResponse:
+    """Garmin session state, for diagnosing a deploy.
+
+    Sits behind the bearer token (only /health is exempt) because it exposes
+    internal state. Reports only — it never triggers an authentication attempt,
+    so before the first tool call it honestly says "never". Returns 503 when the
+    last attempt failed so `curl -f` is meaningful; nothing gates on it.
+    """
+    if _client is None:
+        return JSONResponse({"garmin": "unavailable"}, status_code=503)
+    status = _client.auth_status()
+    code = 503 if status["garmin"] == "error" else 200
+    return JSONResponse(status, status_code=code)
 
 
 # ---------------------------------------------------------------------------

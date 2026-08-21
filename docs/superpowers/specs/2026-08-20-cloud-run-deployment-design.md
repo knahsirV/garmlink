@@ -167,14 +167,39 @@ The service URL is printed at the end of each deploy run.
 
 ## Open Risks
 
-- **Free-tier figures are point-in-time.** The allowances quoted in §2 come from
-  documentation current at time of writing. This project has already been burned
-  once by stale pricing; verify before relying on them.
-- **Garmin auth runs in the lifespan, before the server listens.** A slow or
-  failing Garmin response consumes the container's startup budget on every cold
-  start. Scaling to zero makes cold starts routine, so this is more exposed here
-  than it was on an always-on host. There is currently no re-authentication path
-  and `/health` does not check Garmin session state.
-- **CI does not run the test suite before deploying.** The contract and
-  behavioural tests added in `9f21955` are not wired into the workflow, so a
-  broken push still reaches production.
+All three risks identified at design time have been addressed. Recorded here
+with what was done, since the mitigations are load-bearing.
+
+**Free-tier figures — verified 2026-08-20.** Request-based billing (the default)
+allows 180,000 vCPU-seconds, 360,000 GiB-seconds, and 2M requests per month. At
+`--cpu=1 --memory=512Mi` CPU binds first: roughly 50 hours of active request
+handling per month. Instance-based billing has a higher allowance (240K vCPU-s /
+450K GiB-s) but is still far short of the 2.59M instance-seconds an always-on
+service needs, so it does not change the `--min-instances=0` decision. These
+figures are still point-in-time — re-verify before relying on them.
+
+**Garmin auth is out of the startup path.** The lifespan no longer authenticates.
+`GarminClient` authenticates on first use behind an `asyncio.Lock`, so a cold
+start that bursts several tool calls produces exactly one login, and the blocking
+`login()` runs in the executor rather than stalling the event loop. A
+`GarminConnectAuthenticationError` mid-call discards the session, re-authenticates
+once, and retries; a second failure propagates rather than looping. Cache lookups
+happen before authentication, so a cached read still succeeds while Garmin is
+unreachable.
+
+The accepted trade-off: expired tokens now surface as failing tool calls rather
+than a failed deploy. Config that can be validated without the network — email
+present, `GARMIN_TOKENS_JSON` decodable — is still checked at startup.
+
+`GET /readyz` reports `{garmin, authenticated_at, last_error}`, returning 503 when
+the last attempt failed. It sits behind the bearer token because it exposes
+internal state, and error strings are scrubbed of long token-like runs before
+being surfaced. It reports only and never triggers an authentication attempt, so
+before the first tool call it reports `"never"`. Nothing gates on it — Garmin
+being down must not cause the platform to cycle the container. `/health` stays
+liveness-only for the same reason.
+
+**CI runs the tests before deploying.** `deploy.yml` has a `test` job that the
+`deploy` job declares `needs: test`. It performs a real `pip install -e .`, so
+packaging breakage fails there rather than in Cloud Build — the failure mode that
+killed release v1. All five actions across both jobs are pinned to commit SHAs.

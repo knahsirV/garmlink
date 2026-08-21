@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
 
 from garminconnect import (
     Garmin,
+    GarminConnectAuthenticationError,
     GarminConnectTooManyRequestsError,
 )
 
@@ -20,6 +23,15 @@ __all__ = ["GarminClient"]
 _MAX_RETRIES = 3
 _BASE_DELAY = 1.0
 _JITTER = 0.2
+
+# Long unbroken token-ish runs are stripped from anything we surface, so a
+# Garmin error that echoes a credential cannot leak through /readyz.
+_TOKENISH = re.compile(r"[A-Za-z0-9_\-\.]{20,}")
+
+
+def _safe_error(exc: BaseException) -> str:
+    """Render an exception for reporting without leaking token material."""
+    return f"{type(exc).__name__}: {_TOKENISH.sub('[redacted]', str(exc))[:200]}"
 
 
 class GarminClient:
@@ -32,9 +44,15 @@ class GarminClient:
         self._api: Garmin | None = None
         self._cache = TTLCache()
         self._executor = ThreadPoolExecutor(max_workers=4)
+        # Serialises the first login. A cold start bursts several tool calls at
+        # once; without this each would start its own Garmin login.
+        self._auth_lock = asyncio.Lock()
+        self._authenticated_at: float | None = None
+        self._last_auth_error: str | None = None
 
     def authenticate(self) -> None:
-        """Synchronous authentication. Called once at server startup.
+        """Blocking Garmin login. Driven by _ensure_authenticated(), not called
+        directly from async code — it performs network I/O.
 
         Tries loading from tokenstore first; falls back to email+password login.
         """
@@ -47,6 +65,37 @@ class GarminClient:
         )
         api.login(self._tokenstore_path)
         self._api = api
+
+    async def _ensure_authenticated(self) -> None:
+        """Authenticate on first use, exactly once across concurrent callers."""
+        if self._api is not None:
+            return
+        async with self._auth_lock:
+            if self._api is not None:
+                return  # another task authenticated while we waited
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(self._executor, self.authenticate)
+            except Exception as exc:
+                self._authenticated_at = None
+                self._last_auth_error = _safe_error(exc)
+                raise
+            self._authenticated_at = time.time()
+            self._last_auth_error = None
+
+    def auth_status(self) -> dict:
+        """Garmin session state, for the /readyz endpoint."""
+        if self._last_auth_error is not None:
+            state = "error"
+        elif self._api is not None:
+            state = "authenticated"
+        else:
+            state = "never"
+        return {
+            "garmin": state,
+            "authenticated_at": self._authenticated_at,
+            "last_error": self._last_auth_error,
+        }
 
     def invalidate(self, method_name: str) -> None:
         """Drop every cached entry for the given garminconnect method."""
@@ -93,37 +142,51 @@ class GarminClient:
             else:
                 cache_key = candidate
 
+        # Cache lookup happens before authentication, so a cached read still
+        # succeeds while Garmin is unreachable.
         if cache_key is not None:
             sentinel = object()
             hit = self._cache.get(cache_key, default=sentinel)
             if hit is not sentinel:
                 return hit
 
-        if self._api is None:
-            raise RuntimeError("GarminClient.authenticate() must be called before call()")
+        await self._ensure_authenticated()
 
-        method_fn = getattr(self._api, method_name, None)
-        if method_fn is None or not callable(method_fn):
-            raise ValueError(f"Unknown Garmin API method: {method_name!r}")
         loop = asyncio.get_running_loop()
+        reauthed = False
+        attempt = 0
 
-        last_exc: GarminConnectTooManyRequestsError | None = None
-        for attempt in range(_MAX_RETRIES + 1):
+        while True:
             if attempt > 0:
                 delay = _BASE_DELAY * (2 ** (attempt - 1))
                 jitter = delay * _JITTER * (2 * random.random() - 1)
                 await asyncio.sleep(delay + jitter)
+
+            # Re-resolved each pass: a re-auth replaces self._api, so a method
+            # bound to the old object would call into a dead session.
+            method_fn = getattr(self._api, method_name, None)
+            if method_fn is None or not callable(method_fn):
+                raise ValueError(f"Unknown Garmin API method: {method_name!r}")
+
             try:
                 result = await loop.run_in_executor(
                     self._executor, partial(method_fn, *args, **kwargs)
                 )
-                if cache_key is not None:
-                    self._cache.set(cache_key, result, ttl)
-                return result
-            except GarminConnectTooManyRequestsError as exc:
-                last_exc = exc
-                if attempt == _MAX_RETRIES:
+            except GarminConnectAuthenticationError:
+                # The session died mid-flight. Re-authenticate once and retry;
+                # a second failure propagates rather than looping.
+                if reauthed:
                     raise
+                reauthed = True
+                self._api = None
+                await self._ensure_authenticated()
+                continue
+            except GarminConnectTooManyRequestsError:
+                if attempt >= _MAX_RETRIES:
+                    raise
+                attempt += 1
+                continue
 
-        # Should never reach here, but satisfy type checker.
-        raise last_exc  # type: ignore[misc]
+            if cache_key is not None:
+                self._cache.set(cache_key, result, ttl)
+            return result

@@ -117,8 +117,14 @@ def test_middleware_auth_decisions():
         return "PASSED"
 
     async def run():
-        # /health is open so Fly's health check works.
+        # /health is open so the platform's health check works.
         assert await mw.dispatch(_Req("/health"), passthrough) == "PASSED"
+        # /readyz is NOT open — it exposes internal Garmin session state.
+        resp = await mw.dispatch(_Req("/readyz"), passthrough)
+        assert getattr(resp, "status_code", None) == 401, "/readyz must require auth"
+        assert await mw.dispatch(
+            _Req("/readyz", f"Bearer {GOOD_TOKEN}"), passthrough
+        ) == "PASSED"
         # No header, wrong token, and near-miss token are all rejected.
         for auth in (None, "Bearer wrong", f"Bearer {GOOD_TOKEN[:-1]}x", GOOD_TOKEN):
             resp = await mw.dispatch(_Req("/mcp", auth), passthrough)

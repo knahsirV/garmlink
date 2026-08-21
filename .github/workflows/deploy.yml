@@ -20,7 +20,30 @@ env:
   REGION: us-central1
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # A real install, so packaging breakage fails here rather than in
+      # Cloud Build (release v1 failed exactly that way).
+      - name: Install
+        run: pip install -e .
+
+      - name: Contract test — every client.call site matches garminconnect
+        run: python tests/test_garmin_contract.py
+
+      - name: Auth, cache, and write-bypass behaviour
+        run: |
+          python tests/test_critical_fixes.py
+          python tests/test_auth_lifecycle.py
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

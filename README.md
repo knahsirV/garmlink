@@ -65,6 +65,17 @@ Prerequisites: [gcloud](https://cloud.google.com/sdk/docs/install) and
    curl -o /dev/null -w '%{http_code}\n' "$URL/mcp"   # 401 - auth is working
    ```
 
+5. Check the Garmin session. The server no longer logs in to Garmin at startup —
+   it authenticates on the first tool call and re-authenticates itself if the
+   session dies. That means expired tokens show up as failing tool calls rather
+   than a failed deploy, so check readiness explicitly:
+   ```bash
+   curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" "$URL/readyz"
+   ```
+   Reports `never` until the first tool call, then `authenticated`. A `503` with
+   `"garmin": "error"` means the tokens are bad — re-run `garmin-mcp-auth` and
+   update the `GARMIN_TOKENS_JSON` secret.
+
 ## Auto-Deploy via GitHub Actions
 
 Every push to `main` deploys via `.github/workflows/deploy.yml`. Authentication
