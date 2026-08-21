@@ -127,6 +127,48 @@ def check_return_annotations() -> list[str]:
     return errors
 
 
+# Top-level activity types, from a live get_activity_types() call. Anything with
+# a parent other than the root (17) is a sub-type, and get_activities_by_date
+# rejects sub-types with "Activity type cannot be an activity sub type" — a 400,
+# not an empty list.
+TOP_LEVEL_ACTIVITY_TYPES = {
+    "running", "cycling", "hiking", "other", "walking", "swimming",
+    "fitness_equipment", "multi_sport", "steps", "diving", "safety",
+    "winter_sports", "para_sports", "team_sports", "racket_sports",
+    "water_sports",
+}
+
+
+def check_activity_types() -> list[str]:
+    """get_activities_by_date must be given a top-level activity type."""
+    errors = []
+    for fname, lineno, method, n_pos, _kwargs in iter_call_sites():
+        if method != "get_activities_by_date":
+            continue
+        for path in TOOLS_DIR.glob(fname):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                if not (isinstance(fn, ast.Attribute) and fn.attr == "call"):
+                    continue
+                if node.lineno != lineno or not node.args:
+                    continue
+                if not (isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == "get_activities_by_date"):
+                    continue
+                # positional: (method, startdate, enddate, activitytype)
+                if len(node.args) >= 4 and isinstance(node.args[3], ast.Constant):
+                    value = node.args[3].value
+                    if value not in TOP_LEVEL_ACTIVITY_TYPES:
+                        errors.append(
+                            f"{fname}:{lineno}: {value!r} is not a top-level activity "
+                            f"type; get_activities_by_date returns 400 for sub-types"
+                        )
+    return errors
+
+
 def check() -> list[str]:
     errors: list[str] = []
 
@@ -147,6 +189,7 @@ def check() -> list[str]:
             )
 
     errors.extend(check_return_annotations())
+    errors.extend(check_activity_types())
 
     for fname, lineno, method in iter_dynamic_method_names():
         if not hasattr(Garmin, method):

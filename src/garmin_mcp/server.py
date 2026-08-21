@@ -17,6 +17,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .client import GarminClient
+from .deps import get_garmin_or_none, set_client
 from .tools.daily import mcp as daily_mcp
 from .tools.activities import mcp as activities_mcp
 from .tools.training import mcp as training_mcp
@@ -30,9 +31,6 @@ from .tools.insights import mcp as insights_mcp
 
 load_dotenv()
 
-# Set by the lifespan so the /readyz route can reach the client. The server
-# runs a single GarminClient per process, so one module-level handle is enough.
-_client: GarminClient | None = None
 
 # ---------------------------------------------------------------------------
 # Bearer-auth HTTP middleware
@@ -136,13 +134,12 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
     # use and re-authenticates itself when a session dies; /readyz reports
     # where it stands. Config that can be checked without the network (email
     # present, tokens decodable) is still validated above.
-    global _client
-    _client = client
+    set_client(client)
 
     try:
         yield {"garmin": client}
     finally:
-        _client = None
+        set_client(None)
         client.close()
 
 
@@ -189,9 +186,10 @@ async def readyz(request: Request) -> JSONResponse:
     so before the first tool call it honestly says "never". Returns 503 when the
     last attempt failed so `curl -f` is meaningful; nothing gates on it.
     """
-    if _client is None:
+    client = get_garmin_or_none()
+    if client is None:
         return JSONResponse({"garmin": "unavailable"}, status_code=503)
-    status = _client.auth_status()
+    status = client.auth_status()
     code = 503 if status["garmin"] == "error" else 200
     return JSONResponse(status, status_code=code)
 

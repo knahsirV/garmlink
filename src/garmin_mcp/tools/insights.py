@@ -243,7 +243,10 @@ async def get_triathlon_fitness_snapshot(ctx: Context) -> dict:
     race_preds, ftp, swim_sessions, vo2max = await asyncio.gather(
         client.call("get_race_predictions", ttl=HEALTH_TTL),
         client.call("get_cycling_ftp", ttl=HEALTH_TTL),
-        client.call("get_activities_by_date", thirty_days_ago, today, "lap_swimming", ttl=ACTIVITY_TTL),
+        client.call(
+            "get_activities_by_date", thirty_days_ago, today, "swimming",
+            ttl=ACTIVITY_TTL,
+        ),
         fetch_per_day(
             client, "get_max_metrics", thirty_days_ago, today, ttl=HEALTH_TTL
         ),

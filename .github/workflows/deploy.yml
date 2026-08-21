@@ -42,6 +42,12 @@ jobs:
           python tests/test_critical_fixes.py
           python tests/test_auth_lifecycle.py
 
+      - name: Tool dispatch through the mounted routers
+        env:
+          GARMIN_EMAIL: test@example.invalid
+          ALLOW_UNAUTHENTICATED: '1'
+        run: python tests/test_tool_dispatch.py
+
   deploy:
     needs: test
     runs-on: ubuntu-latest

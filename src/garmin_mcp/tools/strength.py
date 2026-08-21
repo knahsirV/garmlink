@@ -20,7 +20,16 @@ async def get_strength_activities(start_date: str, end_date: str, ctx: Context) 
         end_date:   End date in YYYY-MM-DD format (inclusive).
     """
     client = get_garmin(ctx)
-    return await client.call("get_activities_by_date", start_date, end_date, "strength_training", ttl=ACTIVITY_TTL)
+    # strength_training is a sub-type of fitness_equipment, and the API rejects
+    # sub-types outright, so fetch the parent type and narrow it here.
+    activities = await client.call(
+        "get_activities_by_date", start_date, end_date, "fitness_equipment",
+        ttl=ACTIVITY_TTL,
+    )
+    return [
+        a for a in (activities or [])
+        if "strength" in (a.get("activityType", {}) or {}).get("typeKey", "")
+    ]
 
 
 @mcp.tool()
