@@ -2,6 +2,11 @@
 
 > Written 2026-08-20 at the end of a long session. Everything below the
 > "Current state" section is verified fact unless marked as an open question.
+>
+> **Updated 2026-08-21.** Structured logging landed, the leaked
+> `MCP_AUTH_TOKEN` was rotated, and the stale `FLY_API_TOKEN` was deleted — the
+> outstanding non-OAuth list is now empty. The OAuth work itself is still
+> unstarted and its four open questions are still open.
 
 ## The task
 
@@ -104,10 +109,11 @@ src/garmlink/
   deps.py       set_client() / get_garmin() — the client holder
   client.py     GarminClient: lazy auth, re-auth on dead session, TTL cache
   cache.py      TTLCache
+  logs.py       formatters, redaction, ToolCallLoggingMiddleware
   ranges.py     bounded per-day fan-out helper
   prompts.py    the 4 coaching workflows as MCP prompts
   tools/        11 mounted routers, 45 tools
-tests/          5 files, all run in CI
+tests/          6 files, all run in CI
 scripts/setup-cloudrun.sh   one-time GCP setup (idempotent)
 ```
 
@@ -115,7 +121,9 @@ Auth today lives entirely in `server.py`: `resolve_auth_token()` reads
 `MCP_AUTH_TOKEN` and **fails closed** (missing/blank/<32 chars aborts startup;
 `ALLOW_UNAUTHENTICATED=1` is the deliberate local-dev escape hatch), and
 `BearerAuthMiddleware.dispatch()` exempts only `/health` and uses
-`hmac.compare_digest`.
+`hmac.compare_digest`. It now logs `auth.reject` at WARNING with the path and a
+reason, and deliberately never logs the presented credential — keep that
+property in whatever replaces it.
 
 ## Gotchas learned the hard way this session
 
@@ -127,6 +135,16 @@ Each of these cost real debugging time. They will bite again.
    server passed health checks and listed tools while nothing could run. Hence
    `deps.py` holding the client. **Any OAuth state must not be stashed in the
    lifespan context and expected to reach tools.**
+
+   **But middleware is the opposite case, and this is now verified.** A
+   `Middleware` registered on the *parent* with `mcp.add_middleware()` DOES fire
+   for tools on mounted sub-servers: `FastMCP.call_tool` runs the middleware
+   chain before resolving the tool, and mount aggregation happens during
+   resolution. `ToolCallLoggingMiddleware` relies on this, and
+   `tests/test_logging.py` pins it (mutation-checked: the test fails when the
+   registration is removed). Registering on a *child* also works — FastMCP fires
+   middleware at both levels — so beware double-registering an OAuth middleware
+   and running it twice per call.
 2. **Test isolation is fragile here.** The lifespan constructs a real
    `GarminClient`, so a fake registered via `deps.set_client()` gets
    overwritten — and with real tokens at `~/.garminconnect`, the suite silently
@@ -150,29 +168,42 @@ Each of these cost real debugging time. They will bite again.
 
 ## Outstanding, unrelated to OAuth
 
-- **`MCP_AUTH_TOKEN` was pasted into a chat transcript and never rotated.**
-  Rotate it, or let the OAuth work retire it. Rotating:
-  `NEW=$(openssl rand -hex 32); printf '%s' "$NEW" | gcloud secrets versions add MCP_AUTH_TOKEN --project=garmlink --data-file=-`
-  then force a new revision so the running instance picks it up.
-- **`FLY_API_TOKEN` is still a GitHub repo secret** for a destroyed Fly account:
-  `gh secret delete FLY_API_TOKEN --repo knahsirV/garmlink`
-- **The local working directory is still `~/Comp Sci Projects/garmin-mcp`.**
-  `mv ../garmin-mcp ../garmlink` when no session is running in it.
-- **No logging anywhere in the server.** The next production issue will leave no
-  trace. Worth doing before adding an auth flow that can fail in new ways.
-- **`get_swim_activities` returned 0 results over 30 days.** Plausible, but that
-  tool was broken until this session — sanity-check it against a window with
-  known swims.
+Nothing. Every item on this list has been closed — see below.
+
+## Closed since this doc was written (2026-08-21)
+
+- **Structured logging shipped** (`3cd2d12`). `logs.py` holds the formatters,
+  the redactor, and `ToolCallLoggingMiddleware`; diagnostics were added at the
+  points that previously failed silently. Verified live: Cloud Logging parses
+  `severity`, and `jsonPayload.name` / `.dur_ms` / `.cache` / `.reason` are
+  queryable. See "Reading the logs" below — **do this first when the OAuth flow
+  misbehaves**, since it is the only view of which tool ran.
+- **`MCP_AUTH_TOKEN` rotated.** The leaked value was version 1; it is now
+  **disabled** (not destroyed) and version 2 is live on revision
+  `garmlink-00007-rip`. Confirmed old token → 401, new token → 200. The new
+  value was never printed to a transcript; read it with
+  `gcloud secrets versions access latest --secret=MCP_AUTH_TOKEN --project=garmlink`.
+  **If OAuth ends up retiring bearer auth entirely, destroy version 1 and delete
+  the secret.**
+- **`FLY_API_TOKEN` deleted.** The repo now has zero stored secrets; CI
+  authenticates via Workload Identity Federation. Only old design docs still
+  mention Fly.
+- **The local working directory rename is done** — it is `~/Comp Sci Projects/garmlink`.
+- **`get_swim_activities` returning 0 results was not a bug.** The user has not
+  swum in that window. Closed, no action.
 
 ## Verification commands
 
 ```bash
-# Full suite — use Python 3.12
-python tests/test_garmin_contract.py
-python tests/test_critical_fixes.py
-python tests/test_auth_lifecycle.py
-GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 python tests/test_tool_dispatch.py
-GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 python tests/test_prompts.py
+# Full suite — Python 3.12 only. A 3.11 interpreter silently resolves
+# garminconnect to 0.3.2 and tests a library production never runs (gotcha 4).
+# Set up once with: python3.12 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/python tests/test_garmin_contract.py
+.venv/bin/python tests/test_critical_fixes.py
+.venv/bin/python tests/test_auth_lifecycle.py
+GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_tool_dispatch.py
+GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_prompts.py
+GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_logging.py
 
 # Live
 URL=$(gcloud run services describe garmlink --region us-central1 --project garmlink --format='value(status.url)')
@@ -199,6 +230,45 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Reading the logs
+
+The server emits one JSON object per line; Cloud Run lifts `severity` into the
+log viewer. **Start here when something misbehaves** — Cloud Run's own request
+log shows every MCP call as an indistinguishable `POST /mcp`, so `tool.call` is
+the only record of which of the 45 tools ran.
+
+```bash
+# Everything structured, newest first
+gcloud logging read 'resource.type="cloud_run_revision"
+  AND resource.labels.service_name="garmlink"
+  AND jsonPayload.message!=""' --project=garmlink --limit=20 --freshness=1h \
+  --format='value(severity, jsonPayload.message, jsonPayload.name, jsonPayload.dur_ms)'
+
+# Only failures
+... AND severity>=ERROR
+
+# One tool's history
+... AND jsonPayload.name="get_swim_activities"
+
+# Auth rejections — will matter while bringing OAuth up
+... AND jsonPayload.message="auth.reject"
+```
+
+Events: `startup` (tools, prompts, token_source, auth), `shutdown`, `tool.call`
+(name, args, outcome, dur_ms, cache), `auth.reject` (path, reason),
+`garmin.login` (outcome, dur_ms), `garmin.reauth`, `garmin.retry`.
+
+Two things are never logged, and an OAuth implementation must preserve both:
+**tool results** (the health data) and **presented credentials** on a rejected
+request. Arguments and error strings pass through `redact()` in `logs.py`, which
+strips token-shaped runs — reuse it for anything OAuth surfaces.
+
+Set `LOG_LEVEL` (default INFO) and `LOG_FORMAT` (`json` on Cloud Run, `text`
+locally) to change verbosity or format.
+
+Two `startup` lines with different `instanceId`s are two container instances,
+not a double-run — this was checked.
 
 ## Suggested first move in the new session
 
