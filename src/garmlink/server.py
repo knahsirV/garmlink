@@ -18,6 +18,7 @@ from starlette.responses import JSONResponse
 
 from .client import GarminClient
 from .deps import get_garmin_or_none, set_client
+from .logs import ToolCallLoggingMiddleware, logger, setup_logging
 from .tools.daily import mcp as daily_mcp
 from .tools.activities import mcp as activities_mcp
 from .tools.training import mcp as training_mcp
@@ -65,6 +66,13 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if not auth.startswith("Bearer ") or not hmac.compare_digest(
             auth[7:], self._token
         ):
+            # The presented credential is deliberately never logged: it is
+            # either a near-miss of the real secret or somebody else's, and a
+            # log stream is a bad place for both. Only the reason is recorded.
+            reason = "missing_bearer_prefix" if not auth.startswith("Bearer ") else "bad_token"
+            logger.warning("auth.reject", extra={"fields": {
+                "path": request.url.path, "reason": reason,
+            }})
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
         return await call_next(request)
@@ -137,9 +145,19 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
     # present, tokens decodable) is still validated above.
     set_client(client)
 
+    logger.info("startup", extra={"fields": {
+        "tools": len(await server.list_tools()),
+        "prompts": len(await server.list_prompts()),
+        # Which token source won matters: a deploy that silently fell back to
+        # the local tokenstore would authenticate as nobody and fail lazily.
+        "token_source": "secret" if tokens_b64 else "local_tokenstore",
+        "auth": "disabled" if os.getenv("ALLOW_UNAUTHENTICATED") == "1" else "bearer",
+    }})
+
     try:
         yield {"garmin": client}
     finally:
+        logger.info("shutdown")
         set_client(None)
         client.close()
 
@@ -164,6 +182,13 @@ mcp.mount(insights_mcp)
 
 # Coaching workflows, exposed as MCP prompts rather than tools.
 mcp.mount(coaching_mcp)
+
+# Registered on the parent, after the mounts. FastMCP runs the parent's
+# middleware chain before resolving a tool, and mount aggregation happens during
+# resolution — so this one registration covers all 45 mounted tools. (Verified
+# in test_logging.py rather than assumed: mounted servers do *not* inherit the
+# parent's lifespan, so sub-server inheritance is not something to trust here.)
+mcp.add_middleware(ToolCallLoggingMiddleware())
 
 
 # ---------------------------------------------------------------------------
@@ -205,14 +230,15 @@ async def readyz(request: Request) -> JSONResponse:
 def main() -> None:
     import uvicorn
 
+    setup_logging()
+
     port = int(os.getenv("PORT", "8000"))
     auth_token = resolve_auth_token()
 
     if auth_token is None:
-        print(
-            "WARNING: ALLOW_UNAUTHENTICATED=1 — serving with NO authentication. "
-            "Never do this on a public address.",
-            flush=True,
+        logger.warning(
+            "ALLOW_UNAUTHENTICATED=1 — serving with NO authentication. "
+            "Never do this on a public address."
         )
         middleware = []
     else:

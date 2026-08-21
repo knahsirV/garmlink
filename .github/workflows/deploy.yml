@@ -54,6 +54,12 @@ jobs:
           ALLOW_UNAUTHENTICATED: '1'
         run: python tests/test_prompts.py
 
+      - name: Logging and redaction
+        env:
+          GARMIN_EMAIL: test@example.invalid
+          ALLOW_UNAUTHENTICATED: '1'
+        run: python tests/test_logging.py
+
   deploy:
     needs: test
     runs-on: ubuntu-latest

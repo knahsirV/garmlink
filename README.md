@@ -128,3 +128,61 @@ menu, and Claude Code exposes them as `/mcp__garmlink__morning_check` and so on.
 | `GARMIN_PASSWORD` | Optional. Only used to re-authenticate if the stored tokens expire. |
 | `ALLOW_UNAUTHENTICATED` | Set to `1` to run with no authentication. Localhost development only — never on a public address. |
 | `PORT` | Server port (default: 8000; Cloud Run injects 8080) |
+| `LOG_LEVEL` | `DEBUG`, `INFO` (default), `WARNING`, or `ERROR` |
+| `LOG_FORMAT` | `json` or `text`. Defaults to `json` on Cloud Run (detected via `K_SERVICE`), `text` elsewhere. |
+
+## Local Development
+
+Use a **Python 3.12** virtualenv. This is not optional: `garminconnect` 0.3.3+
+requires 3.12, so a 3.11 interpreter silently resolves to 0.3.11's predecessor
+0.3.2 — a different library from the one CI and production run, with different
+return types. Tests then pass against an API that production never executes.
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install -e .
+```
+
+Run the suite (the same six files CI runs):
+
+```bash
+.venv/bin/python tests/test_garmin_contract.py
+.venv/bin/python tests/test_critical_fixes.py
+.venv/bin/python tests/test_auth_lifecycle.py
+GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_tool_dispatch.py
+GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_prompts.py
+GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_logging.py
+```
+
+Note that real Garmin tokens in `~/.garminconnect` mean a carelessly constructed
+test client will reach the **live** Garmin API. Tests patch the `GarminClient`
+constructor to prevent this; follow that pattern.
+
+## Logs
+
+The server emits one structured line per notable event. On Cloud Run these are
+JSON, and the platform lifts `severity` into the log viewer, so filtering by
+error works:
+
+```
+{"severity":"INFO","message":"startup","tools":45,"prompts":4,"token_source":"secret","auth":"bearer"}
+{"severity":"INFO","message":"tool.call","name":"get_daily_summary","args":{"date":"2026-08-20"},"outcome":"ok","dur_ms":214.0,"cache":"0h/1m"}
+{"severity":"WARNING","message":"auth.reject","path":"/mcp","reason":"bad_token"}
+{"severity":"WARNING","message":"garmin.retry","method":"get_stats","attempt":1,"outcome":"rate_limited"}
+```
+
+`tool.call` is the important one: to Cloud Run's own request log every MCP call
+is an indistinguishable `POST /mcp`, so this is the only place you can see
+*which* of the 45 tools ran, how long it took, and whether it was served from
+cache (`cache` counts hits/misses, since range tools make one call per day).
+
+Two things are deliberately never logged: **tool results**, which are the health
+data this server exists to protect, and **presented credentials** on a rejected
+request. Arguments and error messages are passed through a redactor that strips
+token-shaped strings.
+
+Reading them:
+
+```bash
+gcloud run services logs read garmlink --region us-central1 --project garmlink --limit 50
+```

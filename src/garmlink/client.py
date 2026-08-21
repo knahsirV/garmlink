@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -17,21 +16,13 @@ from garminconnect import (
 )
 
 from .cache import ACTIVITY_TTL, HEALTH_TTL, STATIC_TTL, TTLCache
+from .logs import logger, record_cache, safe_error
 
 __all__ = ["GarminClient"]
 
 _MAX_RETRIES = 3
 _BASE_DELAY = 1.0
 _JITTER = 0.2
-
-# Long unbroken token-ish runs are stripped from anything we surface, so a
-# Garmin error that echoes a credential cannot leak through /readyz.
-_TOKENISH = re.compile(r"[A-Za-z0-9_\-\.]{20,}")
-
-
-def _safe_error(exc: BaseException) -> str:
-    """Render an exception for reporting without leaking token material."""
-    return f"{type(exc).__name__}: {_TOKENISH.sub('[redacted]', str(exc))[:200]}"
 
 
 class GarminClient:
@@ -74,14 +65,24 @@ class GarminClient:
             if self._api is not None:
                 return  # another task authenticated while we waited
             loop = asyncio.get_running_loop()
+            started = time.perf_counter()
             try:
                 await loop.run_in_executor(self._executor, self.authenticate)
             except Exception as exc:
                 self._authenticated_at = None
-                self._last_auth_error = _safe_error(exc)
+                self._last_auth_error = safe_error(exc)
+                logger.error("garmin.login", extra={"fields": {
+                    "outcome": "error",
+                    "dur_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "error": self._last_auth_error,
+                }})
                 raise
             self._authenticated_at = time.time()
             self._last_auth_error = None
+            logger.info("garmin.login", extra={"fields": {
+                "outcome": "ok",
+                "dur_ms": round((time.perf_counter() - started) * 1000, 1),
+            }})
 
     def auth_status(self) -> dict:
         """Garmin session state, for the /readyz endpoint."""
@@ -147,6 +148,9 @@ class GarminClient:
         if cache_key is not None:
             sentinel = object()
             hit = self._cache.get(cache_key, default=sentinel)
+            # Counted per tool call rather than logged per lookup: a range tool
+            # makes one of these per day and would otherwise flood the stream.
+            record_cache(hit=hit is not sentinel)
             if hit is not sentinel:
                 return hit
 
@@ -176,15 +180,31 @@ class GarminClient:
                 # The session died mid-flight. Re-authenticate once and retry;
                 # a second failure propagates rather than looping.
                 if reauthed:
+                    logger.error("garmin.reauth", extra={"fields": {
+                        "method": method_name, "outcome": "gave_up",
+                    }})
                     raise
                 reauthed = True
                 self._api = None
+                logger.warning("garmin.reauth", extra={"fields": {
+                    "method": method_name, "outcome": "retrying",
+                }})
                 await self._ensure_authenticated()
                 continue
             except GarminConnectTooManyRequestsError:
                 if attempt >= _MAX_RETRIES:
+                    logger.error("garmin.retry", extra={"fields": {
+                        "method": method_name, "attempt": attempt,
+                        "outcome": "exhausted",
+                    }})
                     raise
                 attempt += 1
+                # Without this the next loop sleeps for seconds in total
+                # silence, which reads exactly like a hang in production.
+                logger.warning("garmin.retry", extra={"fields": {
+                    "method": method_name, "attempt": attempt,
+                    "outcome": "rate_limited",
+                }})
                 continue
 
             if cache_key is not None:
