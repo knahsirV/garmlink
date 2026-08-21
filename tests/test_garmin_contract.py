@@ -14,7 +14,7 @@ from pathlib import Path
 
 from garminconnect import Garmin
 
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "src" / "garmin_mcp" / "tools"
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "src" / "garmlink" / "tools"
 
 # Kwargs consumed by GarminClient.call() itself, never forwarded to Garmin.
 _CLIENT_KWARGS = {"ttl", "cache"}

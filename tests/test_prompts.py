@@ -27,7 +27,7 @@ EXPECTED = {"morning_check", "analyze_week", "race_readiness", "create_workout_g
 
 
 def _server():
-    import garmin_mcp.server as server
+    import garmlink.server as server
     return server.mcp
 
 

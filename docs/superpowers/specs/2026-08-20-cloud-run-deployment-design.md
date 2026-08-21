@@ -82,7 +82,7 @@ as environment variables via `--set-secrets`:
 | Secret | Purpose |
 |---|---|
 | `GARMIN_EMAIL` | Garmin account identity |
-| `GARMIN_TOKENS_JSON` | Base64 Garmin OAuth tokens from `garmin-mcp-auth` |
+| `GARMIN_TOKENS_JSON` | Base64 Garmin OAuth tokens from `garmlink-auth` |
 | `MCP_AUTH_TOKEN` | Bearer token protecting the MCP endpoint (32+ chars) |
 
 The Cloud Run runtime service account is granted `roles/secretmanager.secretAccessor`
@@ -92,7 +92,7 @@ enter shell history.
 Note the container filesystem is ephemeral, so `GARMIN_TOKENS_JSON` is
 re-materialized on every cold start and garth's in-memory token refresh is
 discarded. The underlying OAuth1 refresh token expires after roughly a year, at
-which point `garmin-mcp-auth` must be re-run and the secret updated.
+which point `garmlink-auth` must be re-run and the secret updated.
 
 ## 5. CI Authentication
 

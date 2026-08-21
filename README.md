@@ -1,4 +1,4 @@
-# garmin-mcp
+# garmlink
 
 A privacy-focused Garmin Connect MCP server for triathlon training. ~47 tools covering daily health metrics, activity analysis, training load, running, cycling, swimming, strength training, and workout creation — plus triathlon-specific analysis (brick workouts, sport volume balance, cross-sport fitness snapshots).
 
@@ -15,7 +15,7 @@ Run this locally once to generate tokens:
 
 2. Authenticate with Garmin:
    ```bash
-   garmin-mcp-auth
+   garmlink-auth
    ```
    Saves tokens to `~/.garminconnect/garmin_tokens.json` and prints the base64 export command.
 
@@ -73,7 +73,7 @@ Prerequisites: [gcloud](https://cloud.google.com/sdk/docs/install) and
    curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" "$URL/readyz"
    ```
    Reports `never` until the first tool call, then `authenticated`. A `503` with
-   `"garmin": "error"` means the tokens are bad — re-run `garmin-mcp-auth` and
+   `"garmin": "error"` means the tokens are bad — re-run `garmlink-auth` and
    update the `GARMIN_TOKENS_JSON` secret.
 
 ## Auto-Deploy via GitHub Actions
@@ -91,7 +91,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "garmin": {
+    "garmlink": {
       "url": "https://<your-cloud-run-url>/mcp",
       "headers": { "Authorization": "Bearer <MCP_AUTH_TOKEN>" }
     }
@@ -116,14 +116,14 @@ MCP client rather than only in this project directory.
 | `create_workout_guide` | Guided structured workout builder → pushes to Garmin |
 
 How they surface depends on the client: Claude Desktop lists them in its prompt
-menu, and Claude Code exposes them as `/mcp__garmin__morning_check` and so on.
+menu, and Claude Code exposes them as `/mcp__garmlink__morning_check` and so on.
 
 ## Environment Variables
 
 | Variable | Description |
 |---|---|
 | `GARMIN_EMAIL` | Your Garmin Connect email |
-| `GARMIN_TOKENS_JSON` | Base64-encoded token file (from `garmin-mcp-auth`) |
+| `GARMIN_TOKENS_JSON` | Base64-encoded token file (from `garmlink-auth`) |
 | `MCP_AUTH_TOKEN` | **Required.** Bearer token protecting the MCP endpoint; must be at least 32 characters. The server refuses to start without it. |
 | `GARMIN_PASSWORD` | Optional. Only used to re-authenticate if the stored tokens expire. |
 | `ALLOW_UNAUTHENTICATED` | Set to `1` to run with no authentication. Localhost development only — never on a public address. |

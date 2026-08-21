@@ -20,9 +20,9 @@ def main() -> None:
     client.authenticate()
 
     print("\n✓ Authentication successful. Tokens saved to ~/.garminconnect/\n")
-    print("To deploy on Fly.io, run this command and copy the output:")
-    print(f"  base64 < {tokenstore / 'garmin_tokens.json'}")
-    print("\nThen set it as GARMIN_TOKENS_JSON via: flyctl secrets set GARMIN_TOKENS_JSON=<output>")
+    print("To deploy, run:  ./scripts/setup-cloudrun.sh")
+    print("It reads the token file directly and stores it in Secret Manager as")
+    print("GARMIN_TOKENS_JSON — no need to copy anything by hand.")
 
 
 if __name__ == "__main__":

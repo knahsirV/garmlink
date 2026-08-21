@@ -14,7 +14,7 @@ PROJECT_ID="${PROJECT_ID:-garmlink}"        # must be globally unique
 REGION="${REGION:-us-central1}"
 SERVICE="${SERVICE:-garmlink}"
 GITHUB_OWNER="${GITHUB_OWNER:-knahsirV}"
-GITHUB_REPO="${GITHUB_REPO:-knahsirV/garmin-mcp}"
+GITHUB_REPO="${GITHUB_REPO:-knahsirV/garmlink}"
 POOL="${POOL:-github}"
 PROVIDER="${PROVIDER:-github-oidc}"
 DEPLOY_SA_NAME="${DEPLOY_SA_NAME:-gh-deployer}"
@@ -74,14 +74,14 @@ put_secret() {
 
 create_secret GARMIN_EMAIL "GARMIN_EMAIL"
 
-# The token blob is ~2.8KB of base64 — read it from the file garmin-mcp-auth
+# The token blob is ~2.8KB of base64 — read it from the file garmlink-auth
 # wrote rather than making anyone paste it into a silent prompt.
 TOKEN_FILE="${TOKEN_FILE:-${HOME}/.garminconnect/garmin_tokens.json}"
 if [[ -f "${TOKEN_FILE}" ]]; then
   echo "    GARMIN_TOKENS_JSON from ${TOKEN_FILE}"
   put_secret GARMIN_TOKENS_JSON "$(base64 < "${TOKEN_FILE}" | tr -d '\n')"
 else
-  echo "    ${TOKEN_FILE} not found — run 'garmin-mcp-auth' first, or paste the base64 below."
+  echo "    ${TOKEN_FILE} not found — run 'garmlink-auth' first, or paste the base64 below."
   create_secret GARMIN_TOKENS_JSON "GARMIN_TOKENS_JSON (base64)" hidden
 fi
 

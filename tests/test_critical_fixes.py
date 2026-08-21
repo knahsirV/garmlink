@@ -12,9 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from garmin_mcp.cache import TTLCache  # noqa: E402
-from garmin_mcp.client import GarminClient  # noqa: E402
-from garmin_mcp.server import (  # noqa: E402
+from garmlink.cache import TTLCache  # noqa: E402
+from garmlink.client import GarminClient  # noqa: E402
+from garmlink.server import (  # noqa: E402
     MIN_TOKEN_LENGTH,
     BearerAuthMiddleware,
     resolve_auth_token,

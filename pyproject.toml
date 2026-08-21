@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "garmin-mcp"
+name = "garmlink"
 version = "0.1.0"
 # garminconnect 0.3.3+ requires 3.12. Claiming 3.11 support meant pip silently
 # resolved to garminconnect 0.3.2 locally while CI and the Docker image (both
@@ -20,8 +20,8 @@ dependencies = [
 ]
 
 [project.scripts]
-garmin-mcp = "garmin_mcp.server:main"
-garmin-mcp-auth = "garmin_mcp.auth:main"
+garmlink = "garmlink.server:main"
+garmlink-auth = "garmlink.auth:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/garmin_mcp"]
+packages = ["src/garmlink"]

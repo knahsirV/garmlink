@@ -8,7 +8,7 @@ from ..cache import HEALTH_TTL
 from ..deps import get_garmin
 from ..ranges import fetch_per_day
 
-mcp = FastMCP("garmin-training")
+mcp = FastMCP("training")
 
 
 @mcp.tool()

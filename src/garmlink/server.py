@@ -148,7 +148,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
 # FastMCP app
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("garmin-mcp", lifespan=lifespan)
+mcp = FastMCP("garmlink", lifespan=lifespan)
 
 # Mount all tool sub-servers onto the main app.
 mcp.mount(daily_mcp)

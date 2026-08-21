@@ -7,7 +7,7 @@ from fastmcp import Context, FastMCP
 from ..cache import HEALTH_TTL
 from ..deps import get_garmin
 
-mcp = FastMCP("garmin-daily")
+mcp = FastMCP("daily")
 
 
 @mcp.tool()

@@ -16,9 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import garmin_mcp.client as client_mod  # noqa: E402
+import garmlink.client as client_mod  # noqa: E402
 from garminconnect import GarminConnectAuthenticationError  # noqa: E402
-from garmin_mcp.client import GarminClient  # noqa: E402
+from garmlink.client import GarminClient  # noqa: E402
 
 
 class _FakeGarmin:

@@ -7,7 +7,7 @@ from fastmcp import Context, FastMCP
 from ..cache import ACTIVITY_TTL
 from ..deps import get_garmin
 
-mcp = FastMCP("garmin-activities")
+mcp = FastMCP("activities")
 
 
 @mcp.tool()

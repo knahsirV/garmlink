@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from fastmcp import Client  # noqa: E402
 
-import garmin_mcp.deps as deps  # noqa: E402
+import garmlink.deps as deps  # noqa: E402
 
 
 class _FakeClient:
@@ -63,7 +63,7 @@ TOOLS = [
 
 
 def test_every_mounted_router_dispatches():
-    import garmin_mcp.server as server
+    import garmlink.server as server
 
     fake = _FakeClient()
     original = server.GarminClient
