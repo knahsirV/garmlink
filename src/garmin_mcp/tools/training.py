@@ -27,7 +27,7 @@ async def get_training_status(date: str, ctx: Context) -> dict:
 
 
 @mcp.tool()
-async def get_training_readiness(date: str, ctx: Context) -> dict:
+async def get_training_readiness(date: str, ctx: Context) -> dict | list:
     """
     Return the training readiness score for the given date, reflecting how
     prepared the body is for a hard workout based on sleep, HRV, recovery,

@@ -5,10 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "garmin-mcp"
 version = "0.1.0"
-requires-python = ">=3.11"
+# garminconnect 0.3.3+ requires 3.12. Claiming 3.11 support meant pip silently
+# resolved to garminconnect 0.3.2 locally while CI and the Docker image (both
+# 3.12) got 0.3.11 — the same constraint yielding two different libraries.
+requires-python = ">=3.12"
 dependencies = [
-    "garminconnect>=0.3.2",
-    "fastmcp>=2.0",
+    # Exact pin: this is a 0.x library that has already broken this project
+    # twice — a login() signature change (a87bf69) and get_training_readiness
+    # switching from dict to list between 0.3.2 and 0.3.11.
+    "garminconnect==0.3.11",
+    "fastmcp>=3.4,<4",
     "python-dotenv>=1.0",
     "uvicorn>=0.30",
 ]
