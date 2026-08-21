@@ -103,8 +103,38 @@ done
 
 # --- deploy service account --------------------------------------------------
 echo "==> Creating deploy service account"
-gcloud iam service-accounts create "${DEPLOY_SA_NAME}" \
-  --display-name="GitHub Actions deployer" 2>/dev/null || echo "    exists"
+if gcloud iam service-accounts describe "${DEPLOY_SA}" >/dev/null 2>&1; then
+  echo "    ${DEPLOY_SA_NAME} exists"
+else
+  # No 2>/dev/null here: a real failure must be visible, not swallowed.
+  gcloud iam service-accounts create "${DEPLOY_SA_NAME}" \
+    --display-name="GitHub Actions deployer"
+fi
+
+# Service account creation is eventually consistent. Binding a role to one that
+# has not propagated fails with "does not exist", so wait for it to resolve.
+echo "    waiting for the service account to propagate"
+for i in $(seq 1 30); do
+  if gcloud iam service-accounts describe "${DEPLOY_SA}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+# The describe above can succeed before the IAM policy backend agrees, so each
+# binding also retries.
+bind_role() {
+  local role="$1"
+  for i in $(seq 1 10); do
+    if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+        --member="serviceAccount:${DEPLOY_SA}" --role="${role}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 3
+  done
+  echo "    ERROR: could not bind ${role} to ${DEPLOY_SA}" >&2
+  return 1
+}
 
 for role in \
   roles/run.admin \
@@ -114,8 +144,8 @@ for role in \
   roles/logging.viewer \
   roles/iam.serviceAccountUser
 do
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${DEPLOY_SA}" --role="${role}" >/dev/null
+  echo "    binding ${role}"
+  bind_role "${role}"
 done
 
 # --- workload identity federation (keyless GitHub -> GCP auth) ---------------
