@@ -103,16 +103,20 @@ Replace `<your-cloud-run-url>` with the URL printed at the end of the deploy
 workflow (or from step 4 above), and `<MCP_AUTH_TOKEN>` with the token you set
 during setup.
 
-## Coaching Skills
+## Coaching Workflows
 
-Run these slash commands from this project directory in Claude Code:
+Four guided workflows ship with the server as MCP prompts, so they work in any
+MCP client rather than only in this project directory.
 
-| Command | Purpose |
+| Prompt | Purpose |
 |---|---|
-| `/morning-check` | Daily readiness briefing (HRV, sleep, body battery) |
-| `/analyze-week` | Weekly training load and sport balance review |
-| `/race-readiness` | Pre-race fitness assessment across all disciplines |
-| `/create-workout` | Guided structured workout builder → pushes to Garmin |
+| `morning_check` | Daily readiness briefing (HRV, sleep, body battery) |
+| `analyze_week` | Weekly training load and sport balance review |
+| `race_readiness` | Pre-race fitness assessment across all disciplines |
+| `create_workout_guide` | Guided structured workout builder → pushes to Garmin |
+
+How they surface depends on the client: Claude Desktop lists them in its prompt
+menu, and Claude Code exposes them as `/mcp__garmin__morning_check` and so on.
 
 ## Environment Variables
 

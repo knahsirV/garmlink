@@ -48,6 +48,12 @@ jobs:
           ALLOW_UNAUTHENTICATED: '1'
         run: python tests/test_tool_dispatch.py
 
+      - name: Coaching prompts
+        env:
+          GARMIN_EMAIL: test@example.invalid
+          ALLOW_UNAUTHENTICATED: '1'
+        run: python tests/test_prompts.py
+
   deploy:
     needs: test
     runs-on: ubuntu-latest

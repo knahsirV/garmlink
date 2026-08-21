@@ -28,6 +28,7 @@ from .tools.strength import mcp as strength_mcp
 from .tools.workouts import mcp as workouts_mcp
 from .tools.profile import mcp as profile_mcp
 from .tools.insights import mcp as insights_mcp
+from .prompts import mcp as coaching_mcp
 
 load_dotenv()
 
@@ -160,6 +161,9 @@ mcp.mount(strength_mcp)
 mcp.mount(workouts_mcp)
 mcp.mount(profile_mcp)
 mcp.mount(insights_mcp)
+
+# Coaching workflows, exposed as MCP prompts rather than tools.
+mcp.mount(coaching_mcp)
 
 
 # ---------------------------------------------------------------------------
