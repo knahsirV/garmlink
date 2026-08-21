@@ -40,15 +40,25 @@ RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 # GARMIN_EMAIL is prompted for; the token blob is read from disk and the bearer
 # token is generated. Nothing lands in shell history.
 echo "==> Creating secrets"
+# $3 = "hidden" to suppress echo. Only use it for genuine secrets — a silent
+# prompt for a non-secret just looks like the script has hung.
 create_secret() {
-  local name="$1" prompt="$2" value
+  local name="$1" prompt="$2" hidden="${3:-}" value
   if gcloud secrets describe "${name}" >/dev/null 2>&1; then
     echo "    ${name} exists — adding a new version"
   else
     gcloud secrets create "${name}" --replication-policy=automatic
   fi
-  read -rsp "    ${prompt}: " value
-  echo
+  if [[ "${hidden}" == "hidden" ]]; then
+    read -rsp "    ${prompt}: " value
+    echo
+  else
+    read -rp "    ${prompt}: " value
+  fi
+  if [[ -z "${value}" ]]; then
+    echo "    ERROR: ${name} cannot be empty" >&2
+    return 1
+  fi
   printf '%s' "${value}" | gcloud secrets versions add "${name}" --data-file=-
 }
 # Stores a value produced by a command, rather than typed at a prompt.
@@ -72,7 +82,7 @@ if [[ -f "${TOKEN_FILE}" ]]; then
   put_secret GARMIN_TOKENS_JSON "$(base64 < "${TOKEN_FILE}" | tr -d '\n')"
 else
   echo "    ${TOKEN_FILE} not found — run 'garmin-mcp-auth' first, or paste the base64 below."
-  create_secret GARMIN_TOKENS_JSON "GARMIN_TOKENS_JSON (base64)"
+  create_secret GARMIN_TOKENS_JSON "GARMIN_TOKENS_JSON (base64)" hidden
 fi
 
 # Generated rather than typed. Retrieve it later with:
