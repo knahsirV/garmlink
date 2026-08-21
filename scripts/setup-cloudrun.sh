@@ -37,7 +37,8 @@ PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(proje
 RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
 # --- secrets -----------------------------------------------------------------
-# Reads the three values interactively so they never land in your shell history.
+# GARMIN_EMAIL is prompted for; the token blob is read from disk and the bearer
+# token is generated. Nothing lands in shell history.
 echo "==> Creating secrets"
 create_secret() {
   local name="$1" prompt="$2" value
@@ -50,9 +51,38 @@ create_secret() {
   echo
   printf '%s' "${value}" | gcloud secrets versions add "${name}" --data-file=-
 }
-create_secret GARMIN_EMAIL       "GARMIN_EMAIL"
-create_secret GARMIN_TOKENS_JSON "GARMIN_TOKENS_JSON (base64 from garmin-mcp-auth)"
-create_secret MCP_AUTH_TOKEN     "MCP_AUTH_TOKEN (32+ chars; openssl rand -hex 32)"
+# Stores a value produced by a command, rather than typed at a prompt.
+put_secret() {
+  local name="$1" value="$2"
+  if gcloud secrets describe "${name}" >/dev/null 2>&1; then
+    echo "    ${name} exists — adding a new version"
+  else
+    gcloud secrets create "${name}" --replication-policy=automatic
+  fi
+  printf '%s' "${value}" | gcloud secrets versions add "${name}" --data-file=-
+}
+
+create_secret GARMIN_EMAIL "GARMIN_EMAIL"
+
+# The token blob is ~2.8KB of base64 — read it from the file garmin-mcp-auth
+# wrote rather than making anyone paste it into a silent prompt.
+TOKEN_FILE="${TOKEN_FILE:-${HOME}/.garminconnect/garmin_tokens.json}"
+if [[ -f "${TOKEN_FILE}" ]]; then
+  echo "    GARMIN_TOKENS_JSON from ${TOKEN_FILE}"
+  put_secret GARMIN_TOKENS_JSON "$(base64 < "${TOKEN_FILE}" | tr -d '\n')"
+else
+  echo "    ${TOKEN_FILE} not found — run 'garmin-mcp-auth' first, or paste the base64 below."
+  create_secret GARMIN_TOKENS_JSON "GARMIN_TOKENS_JSON (base64)"
+fi
+
+# Generated rather than typed. Retrieve it later with:
+#   gcloud secrets versions access latest --secret=MCP_AUTH_TOKEN
+if gcloud secrets describe MCP_AUTH_TOKEN >/dev/null 2>&1; then
+  echo "    MCP_AUTH_TOKEN exists — keeping the current value"
+else
+  echo "    MCP_AUTH_TOKEN generated (64 hex chars)"
+  put_secret MCP_AUTH_TOKEN "$(openssl rand -hex 32)"
+fi
 
 echo "==> Letting the Cloud Run runtime read those secrets"
 for s in GARMIN_EMAIL GARMIN_TOKENS_JSON MCP_AUTH_TOKEN; do
@@ -136,7 +166,10 @@ Setup complete.
   service   ${SERVICE}
   deployer  ${DEPLOY_SA}
 
+Read your bearer token with:
+  gcloud secrets versions access latest --secret=MCP_AUTH_TOKEN --project=${PROJECT_ID}
+
 Push to main (or run the workflow manually) to deploy. The service URL is
 printed at the end of the workflow run; put it in your Claude Desktop config
-as <url>/mcp with the same MCP_AUTH_TOKEN as the Authorization bearer token.
+as <url>/mcp with that token as the Authorization bearer value.
 DONE
