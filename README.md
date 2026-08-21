@@ -21,45 +21,57 @@ Run this locally once to generate tokens:
 
 3. Copy the printed `GARMIN_TOKENS_JSON=...` value — you'll need it for the secrets step below.
 
-## Deploy to Fly.io
+## Deploy to Google Cloud Run
 
-Prerequisites: [flyctl](https://fly.io/docs/flyctl/install/) installed and authenticated (`flyctl auth login`).
+Runs on Cloud Run's perpetual free tier. The service scales to zero when idle, so
+the first request after a quiet period takes ~1-3s to wake — no dashboard step,
+it just waits. `--min-instances=0` is deliberate: one always-warm instance would
+far exceed the free vCPU-second allowance.
 
-1. Register the app name (first time only):
+Prerequisites: [gcloud](https://cloud.google.com/sdk/docs/install) and
+[gh](https://cli.github.com/) installed.
+
+1. Log in as yourself and create (or pick) a project:
    ```bash
-   flyctl apps create garmin-mcp
+   gcloud auth login
+   gcloud projects create garmlink        # skip if you already have one
    ```
-   > If `garmin-mcp` is taken on Fly.io (global namespace), use a unique name like `garmin-mcp-yourname` and update the `app` field in `fly.toml` to match.
+   Cloud Run's free tier requires billing to be enabled on the project. You are
+   not charged inside the free limits, but a card must be on file.
 
-2. Set secrets:
+2. Run the one-time setup — enables APIs, stores your three secrets in Secret
+   Manager, creates a deploy service account, and wires up keyless GitHub auth
+   via Workload Identity Federation:
    ```bash
-   flyctl secrets set \
-     GARMIN_EMAIL=you@example.com \
-     GARMIN_TOKENS_JSON=<base64-from-auth-step> \
-     MCP_AUTH_TOKEN=$(openssl rand -hex 32)
+   ./scripts/setup-cloudrun.sh
    ```
-   Save the generated `MCP_AUTH_TOKEN` value — you'll need it for the Claude Desktop config.
+   It prompts for `GARMIN_EMAIL`, `GARMIN_TOKENS_JSON`, and `MCP_AUTH_TOKEN`
+   (generate one with `openssl rand -hex 32` — it must be at least 32
+   characters, and the server refuses to start without it). Save that token for
+   the Claude Desktop config below.
 
-3. Deploy:
+   Edit the variables at the top of the script first if you want a different
+   project id, region, or service name.
+
+3. Deploy — push to `main`, or trigger the workflow by hand:
    ```bash
-   flyctl deploy
+   gh workflow run "Deploy to Cloud Run"
    ```
 
 4. Verify:
    ```bash
-   curl https://garmlink.fly.dev/health
+   URL=$(gcloud run services describe garmlink --region us-central1 --format='value(status.url)')
+   curl "$URL/health"          # {"status":"ok"}
+   curl -o /dev/null -w '%{http_code}\n' "$URL/mcp"   # 401 - auth is working
    ```
-   Expected: `{"status":"ok"}`
 
 ## Auto-Deploy via GitHub Actions
 
-After the first manual deploy, subsequent pushes to `main` auto-deploy via GitHub Actions.
-
-Add `FLY_API_TOKEN` to your GitHub repo secrets:
-```bash
-flyctl tokens create deploy
-```
-Copy the output, then go to: GitHub repo → Settings → Secrets and variables → Actions → New repository secret → name it `FLY_API_TOKEN`.
+Every push to `main` deploys via `.github/workflows/deploy.yml`. Authentication
+is keyless — GitHub mints a short-lived OIDC token that Google exchanges for
+credentials, so there is no long-lived service-account key in your repo secrets.
+The setup script sets the three repo variables the workflow reads
+(`GCP_PROJECT_ID`, `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`).
 
 ## Claude Desktop Config
 
@@ -69,14 +81,16 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "garmin": {
-      "url": "https://garmlink.fly.dev/mcp",
+      "url": "https://<your-cloud-run-url>/mcp",
       "headers": { "Authorization": "Bearer <MCP_AUTH_TOKEN>" }
     }
   }
 }
 ```
 
-Replace `<MCP_AUTH_TOKEN>` with the value you set in the secrets step.
+Replace `<your-cloud-run-url>` with the URL printed at the end of the deploy
+workflow (or from step 4 above), and `<MCP_AUTH_TOKEN>` with the token you set
+during setup.
 
 ## Coaching Skills
 
@@ -98,4 +112,4 @@ Run these slash commands from this project directory in Claude Code:
 | `MCP_AUTH_TOKEN` | **Required.** Bearer token protecting the MCP endpoint; must be at least 32 characters. The server refuses to start without it. |
 | `GARMIN_PASSWORD` | Optional. Only used to re-authenticate if the stored tokens expire. |
 | `ALLOW_UNAUTHENTICATED` | Set to `1` to run with no authentication. Localhost development only — never on a public address. |
-| `PORT` | Server port (default: 8000, set automatically by Fly.io) |
+| `PORT` | Server port (default: 8000; Cloud Run injects 8080) |
