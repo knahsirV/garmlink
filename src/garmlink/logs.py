@@ -29,6 +29,7 @@ from fastmcp.server.middleware import Middleware
 
 __all__ = [
     "JsonFormatter",
+    "RedactingFilter",
     "TextFormatter",
     "ToolCallLoggingMiddleware",
     "cache_summary",
@@ -58,6 +59,29 @@ def redact(text: str) -> str:
 def safe_error(exc: BaseException) -> str:
     """Render an exception for reporting without leaking token material."""
     return f"{type(exc).__name__}: {redact(str(exc))[:200]}"
+
+
+class RedactingFilter(logging.Filter):
+    """Apply `redact()` to records emitted by code that cannot redact itself.
+
+    Our own call sites redact before logging. Third-party loggers — fastmcp's
+    OAuth paths in particular, which log upstream response bodies — have no
+    such discipline, so the scrub happens at the handler instead.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                redact(a) if isinstance(a, str) else a for a in record.args
+            )
+        elif isinstance(record.args, dict):
+            record.args = {
+                k: redact(v) if isinstance(v, str) else v
+                for k, v in record.args.items()
+            }
+        return True
 
 
 def _fields(record: logging.LogRecord) -> dict[str, Any]:
@@ -212,10 +236,15 @@ class ToolCallLoggingMiddleware(Middleware):
 
 
 def setup_logging() -> None:
-    """Install a single stdout handler on the `garmlink` logger.
+    """Install a single stdout handler on the `garmlink` and `fastmcp` loggers.
 
     Idempotent: repeated calls (tests, reloads) replace the handler rather than
     stacking duplicates that would print every line twice.
+
+    `fastmcp` is included because the OAuth flow — consent, registration, token
+    exchange, upstream refresh failures — logs there rather than here. Left on
+    the root logger it would be unformatted, unqueryable, and unredacted, which
+    is exactly the stream you need when the connector misbehaves.
     """
     level = os.getenv("LOG_LEVEL", "INFO").upper()
     on_cloud_run = bool(os.getenv("K_SERVICE"))
@@ -223,12 +252,14 @@ def setup_logging() -> None:
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter() if fmt == "json" else TextFormatter())
+    handler.addFilter(RedactingFilter())
 
-    logger = logging.getLogger("garmlink")
-    for existing in list(logger.handlers):
-        logger.removeHandler(existing)
-    logger.addHandler(handler)
-    logger.setLevel(getattr(logging, level, logging.INFO))
-    # Ours is the only handler that should render these records; uvicorn's root
-    # handler would otherwise print an unformatted copy of every line.
-    logger.propagate = False
+    for name in ("garmlink", "fastmcp"):
+        lg = logging.getLogger(name)
+        for existing in list(lg.handlers):
+            lg.removeHandler(existing)
+        lg.addHandler(handler)
+        lg.setLevel(getattr(logging, level, logging.INFO))
+        # Ours is the only handler that should render these records; uvicorn's
+        # root handler would otherwise print an unformatted copy of every line.
+        lg.propagate = False

@@ -45,12 +45,14 @@ from garmlink.server import BearerAuthMiddleware  # noqa: E402
 
 from garmlink.logs import (  # noqa: E402
     JsonFormatter,
+    RedactingFilter,
     TextFormatter,
     ToolCallLoggingMiddleware,
     cache_summary,
     record_cache,
     redact,
     safe_error,
+    setup_logging,
     track_cache,
 )
 
@@ -493,6 +495,59 @@ def test_health_check_is_not_logged_as_a_rejection():
         assert client.get("/health").status_code == 200
 
     assert not logs.with_message("auth.reject")
+
+
+# ---------------------------------------------------------------------------
+# Third-party (fastmcp) log capture and redaction
+# ---------------------------------------------------------------------------
+
+def test_fastmcp_logger_reaches_our_handler():
+    # After the OAuth cutover, the whole auth flow logs through `fastmcp.*`.
+    # If those records do not reach our handler they are not JSON, carry no
+    # `severity` for Cloud Logging to lift, and never pass through redact().
+    import io
+    setup_logging()
+    fastmcp_logger = logging.getLogger("fastmcp")
+    assert fastmcp_logger.handlers, "setup_logging must configure the fastmcp logger"
+    assert fastmcp_logger.propagate is False, "records would otherwise print twice"
+
+    stream = io.StringIO()
+    handler = fastmcp_logger.handlers[0]
+    original = handler.stream  # type: ignore[attr-defined]
+    handler.stream = stream    # type: ignore[attr-defined]
+    try:
+        fastmcp_logger.warning("oauth flow failed")
+    finally:
+        handler.stream = original  # type: ignore[attr-defined]
+    assert "oauth flow failed" in stream.getvalue()
+
+
+def test_third_party_token_material_is_redacted():
+    # fastmcp's auth paths log upstream response bodies. Our own code redacts
+    # at the call site; a third-party logger cannot, so the handler must.
+    import io
+    setup_logging()
+    fastmcp_logger = logging.getLogger("fastmcp")
+    secret = "gho_" + "a" * 36
+
+    stream = io.StringIO()
+    handler = fastmcp_logger.handlers[0]
+    original = handler.stream  # type: ignore[attr-defined]
+    handler.stream = stream    # type: ignore[attr-defined]
+    try:
+        fastmcp_logger.warning("upstream said %s", secret)
+    finally:
+        handler.stream = original  # type: ignore[attr-defined]
+
+    output = stream.getvalue()
+    assert secret not in output, output
+    assert "[redacted]" in output, output
+
+
+def test_redacting_filter_leaves_ordinary_messages_alone():
+    record = logging.LogRecord("fastmcp", logging.INFO, "", 0, "starting up", (), None)
+    assert RedactingFilter().filter(record) is True
+    assert record.getMessage() == "starting up"
 
 
 # ---------------------------------------------------------------------------
