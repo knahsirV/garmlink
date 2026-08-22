@@ -7,6 +7,16 @@
 > `MCP_AUTH_TOKEN` was rotated, and the stale `FLY_API_TOKEN` was deleted — the
 > outstanding non-OAuth list is now empty. The OAuth work itself is still
 > unstarted and its four open questions are still open.
+>
+> **Updated again in a design session (env date 2026-08-20 — note this reads as
+> earlier than the line above; the 08-21 stamp appears to be ahead of the real
+> clock, so trust this ordering, not the dates).** **All four open questions are
+> now answered**, and the fastmcp OAuth surface was inspected directly — see
+> "Verified findings" for five facts that shape the design, two of which are
+> traps (default OAuth state is stored on ephemeral local disk under a
+> scale-to-zero service; `/readyz` silently becomes public). Still **no design
+> doc, no spec, no code.** Decisions: OAuth-only cutover, GitHub as provider,
+> fail-closed env-var allowlist, `MCP_AUTH_TOKEN` retired.
 
 ## The task
 
@@ -59,18 +69,108 @@ Google doesn't offer DCR. `OAuthProxy` presents DCR to the MCP client while
 holding fixed upstream credentials — precisely this gap. Confirm this is still
 how FastMCP recommends bridging before designing around it.
 
-## Open questions — resolve these first
+## Open questions — ALL FOUR RESOLVED (design session, 2026-08-20)
 
-1. **Dual auth or OAuth-only?** Claude Code and Desktop work today on the static
-   bearer. Both also support OAuth for remote MCP, so an OAuth-only server is
-   coherent and retires the static token entirely — but it means reconfiguring
-   the working clients. Supporting both is more code and more attack surface.
-2. **Which provider?** Google is the assumption, not a decision. GitHub is also
-   bundled and the account exists.
-3. **Single-user or shareable?** Everything so far assumes one user. An email
-   allowlist is the simplest enforcement.
-4. **What happens to `MCP_AUTH_TOKEN`?** If OAuth-only, the secret and
-   `resolve_auth_token()` go away. If dual, decide precedence.
+Answered by the user in a brainstorming session. No longer open; treat these as
+decisions, not assumptions.
+
+1. **Dual auth or OAuth-only? → OAuth-only, one cutover.** OAuth lands and the
+   bearer path is deleted in the same change. The user was shown the rollback
+   risk (no working path to the server if OAuth misbehaves in production, and
+   Claude Code + Desktop get reconfigured in the same breath) and chose this
+   anyway. **Mitigation owed: front-load live verification in the plan** — see
+   gotcha 6, every bug this project has had survived a green test suite.
+2. **Which provider? → GitHub.** Not Google. `GitHubProvider` and
+   `GoogleProvider` take near-identical constructors, so this is about the
+   identity provider's operational friction, not FastMCP code. GitHub: four
+   fields, no consent screen, no publishing status, no verification review.
+   Google was rejected because the real work is the OAuth consent screen, and
+   an app in "Testing" publishing status has Google expire refresh tokens after
+   ~7 days — the connector would silently log you out weekly. (That 7-day
+   behavior was *not* verified against Google's docs this session; it only
+   needs re-checking if someone revisits the provider choice.)
+3. **Single-user or shareable? → env-var allowlist, fail closed.**
+   `GITHUB_ALLOWED_USERS`, comma-separated logins; empty or unset **aborts
+   startup**, mirroring what `resolve_auth_token()` does today. Operationally
+   single-user, but adding a reader later is a secret edit, not a code change.
+   **Note the hard constraint that settled this:** `deps.py` holds exactly one
+   `GarminClient` for one Garmin account, so "shareable" can only ever mean
+   *other people read your health data*. Other people connecting their own
+   Garmin is a multi-tenant redesign, not a config option.
+4. **What happens to `MCP_AUTH_TOKEN`? → retired entirely.** Follows from (1).
+   `resolve_auth_token()` and `BearerAuthMiddleware` are deleted, version 1 of
+   the secret gets destroyed (it is currently disabled, not destroyed), and the
+   secret itself is deleted.
+
+## Verified findings about fastmcp 3.4.7 OAuth
+
+Established by inspecting the installed package this session. Each of these
+changes the design; none were assumed.
+
+1. **`GoogleProvider`/`GitHubProvider` have NO built-in identity restriction.**
+   `GoogleTokenVerifier.verify_token` calls Google's `tokeninfo` and accepts any
+   token minted for your OAuth app. With default settings **anyone with an
+   account at the provider who completes the flow reaches the health data.** The
+   allowlist is load-bearing, not a nice-to-have, and we implement it ourselves.
+   **Planned enforcement point: subclass the GitHub token verifier.** It is the
+   narrowest place, fails closed, reuses the existing 401 path, and lets us log
+   `auth.reject` with `reason=not_allowlisted` while still never logging the
+   presented credential.
+2. **Auth wires into the constructor, not as ASGI middleware.**
+   `FastMCP(auth=GitHubProvider(...))`. This *replaces* the current
+   `mcp.http_app(middleware=[Middleware(BearerAuthMiddleware, ...)])` shape
+   rather than sitting beside it. Relevant to gotcha 5: the `BaseHTTPMiddleware`
+   A/B test may not even apply, since the auth no longer goes through one.
+3. **`jwt_signing_key` defaults to being derived from the upstream client
+   secret** — deterministic across instances and cold starts, so issued tokens
+   survive restarts. No action needed. (If a future design supplies no client
+   secret, the key becomes required.)
+4. **Default `client_storage` is a `FileTreeStore` on local disk**
+   (`settings.home / "oauth-proxy" / <key-fingerprint>`), holding DCR client
+   registrations, OAuth transactions, authorization codes, refresh-token
+   mappings, and JTI mappings. **This service scales to zero**, so a cold start
+   wipes all of it, and a flow that starts on one instance can complete on
+   another and fail. In claude.ai this surfaces as "randomly asks me to
+   reconnect." **This is the single biggest architectural risk in the work.**
+5. **`RequireAuthMiddleware` wraps ONLY the MCP endpoint route.** In
+   `create_streamable_http_app`, custom routes are appended separately via
+   `server._get_additional_http_routes()`, outside the auth wrapper. So
+   switching to `FastMCP(auth=...)` **silently makes `/readyz` public** — it
+   sits behind the bearer today and exposes Garmin session state. Must be
+   explicitly guarded; `/health` stays the only open route, as now.
+
+## Storage approach — recommended, NOT yet approved
+
+The user ran out of context before approving. Three options were put up; the
+recommendation is **A**.
+
+- **A — Firestore-backed shared storage (recommended).** Wire `FirestoreStore`
+  as `client_storage`. Keeps scale-to-zero, survives cold starts, correct across
+  instances. Costs a new dependency, enabling the Firestore API, and a role on
+  the runtime service account. Free tier is ample for one user. **Verified: the
+  backend ships in `key_value.aio.stores.firestore` but raises `ImportError`
+  without the `firestore` extra**, so `google-cloud-firestore` becomes a new
+  dependency — **pin it exactly** (gotcha 4).
+- **B — Pin to a single always-on instance.** `--min-instances=1
+  --max-instances=1`, keep the default file store. No new deps or infra, but you
+  pay for an idle instance continuously and every deploy or platform recycle
+  wipes registrations and forces a reconnect. Trades one-time integration work
+  for permanent low-grade flakiness that is annoying to diagnose.
+- **C — GCS FUSE volume mount** at the file-store path. Keeps scale-to-zero and
+  the default code path with no Python deps. **Argued against:** `FileTreeStore`
+  does file locking across many small files, precisely GCS FUSE's weak spot.
+  Plausible-looking and subtly broken.
+
+Also still unanswered: whether `/readyz` should be guarded by the OAuth token or
+by something simpler.
+
+## Where this work stopped
+
+Brainstorming, mid-flight. The four open questions are answered and the research
+above is done; **no design doc, no spec, and no code exist yet.** The remaining
+path is unchanged: finish the sectioned design → spec in
+`docs/superpowers/specs/` → `superpowers:writing-plans`. Resume by confirming
+the storage approach and the `/readyz` question, then write the spec.
 
 ## Current state (all verified live)
 
@@ -272,7 +372,9 @@ not a double-run — this was checked.
 
 ## Suggested first move in the new session
 
-Invoke `superpowers:brainstorming`, state the architectural classification, and
-work the four open questions above — starting with dual-auth vs OAuth-only,
-since it determines everything else. Read `src/garmlink/server.py` first; it is
-the whole of the current auth model in about 70 lines.
+**Superseded — the four questions are answered.** Resume `superpowers:brainstorming`
+at the approaches step: confirm the storage approach (A/B/C above) and whether
+`/readyz` is guarded by the OAuth token or something simpler, then present the
+sectioned design, write the spec, and hand off to `superpowers:writing-plans`.
+Read `src/garmlink/server.py` first; it is the whole of the current auth model
+in about 70 lines, and every line of it is being deleted.
