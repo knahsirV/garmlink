@@ -17,6 +17,11 @@ dependencies = [
     "fastmcp>=3.4,<4",
     "python-dotenv>=1.0",
     "uvicorn>=0.30",
+    # OAuth state (DCR registrations, refresh-token mappings) must outlive a
+    # cold start: this service scales to zero and the default store is a file
+    # tree on ephemeral local disk. Pinned exactly — a floating dep already
+    # resolved to two different libraries on two Pythons once on this project.
+    "google-cloud-firestore==2.28.1",
 ]
 
 [project.scripts]

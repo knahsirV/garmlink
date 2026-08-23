@@ -40,3 +40,20 @@ def get_garmin(ctx: Any = None) -> GarminClient:
 def get_garmin_or_none() -> GarminClient | None:
     """Registered client, or None before the lifespan has run. For /readyz."""
     return _client
+
+
+# The Firestore-backed OAuth store is built in main(), before the app exists,
+# but must be closed by the lifespan. Same reason the GarminClient lives here:
+# a mounted server's lifespan context cannot carry it.
+_oauth_store: Any = None
+
+
+def set_oauth_store(store: Any) -> None:
+    """Register (or clear) the process-wide OAuth state store."""
+    global _oauth_store
+    _oauth_store = store
+
+
+def get_oauth_store() -> Any | None:
+    """Registered OAuth store, or None when running unauthenticated."""
+    return _oauth_store
