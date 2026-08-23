@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from key_value.aio.protocols import AsyncKeyValue
+
 from .client import GarminClient
 
 # The tool modules are separate FastMCP servers mounted onto the main app, and a
@@ -45,15 +47,15 @@ def get_garmin_or_none() -> GarminClient | None:
 # The Firestore-backed OAuth store is built in main(), before the app exists,
 # but must be closed by the lifespan. Same reason the GarminClient lives here:
 # a mounted server's lifespan context cannot carry it.
-_oauth_store: Any = None
+_oauth_store: AsyncKeyValue | None = None
 
 
-def set_oauth_store(store: Any) -> None:
+def set_oauth_store(store: AsyncKeyValue | None) -> None:
     """Register (or clear) the process-wide OAuth state store."""
     global _oauth_store
     _oauth_store = store
 
 
-def get_oauth_store() -> Any | None:
+def get_oauth_store() -> AsyncKeyValue | None:
     """Registered OAuth store, or None when running unauthenticated."""
     return _oauth_store

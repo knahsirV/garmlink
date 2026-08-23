@@ -141,9 +141,10 @@ _readyz_token: str | None = None
 async def health(request: Request) -> JSONResponse:
     """Liveness only — deliberately does not touch Garmin.
 
-    This is the one route the auth middleware lets through, and nothing about
-    Garmin's availability should be able to make the platform cycle the
-    container. For Garmin session state, use /readyz.
+    Public, like /readyz — FastMCP's RequireAuthMiddleware wraps only /mcp, so
+    both custom routes are reachable without a token. Nothing about Garmin's
+    availability should be able to make the platform cycle the container. For
+    Garmin session state, use /readyz.
     """
     return JSONResponse({"status": "ok"})
 
@@ -167,8 +168,13 @@ async def readyz(request: Request) -> JSONResponse:
     """
     if _readyz_token is not None:
         presented = request.headers.get("Authorization", "")
+        # Headers arrive as `str` (decoded latin-1 off the wire), so a non-ASCII
+        # `Authorization` value is valid input here. `hmac.compare_digest`
+        # raises TypeError comparing two non-ASCII `str`s, which would otherwise
+        # 500 instead of 401 and land outside the JSON log pipeline. Comparing
+        # bytes sidesteps that entirely.
         if not presented.startswith("Bearer ") or not hmac.compare_digest(
-            presented[7:], _readyz_token
+            presented[7:].encode(), _readyz_token.encode()
         ):
             # The presented credential is deliberately never logged.
             logger.warning("auth.reject", extra={"fields": {
