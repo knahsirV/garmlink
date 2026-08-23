@@ -26,6 +26,7 @@ from fastmcp.server.auth.auth import AccessToken  # noqa: E402
 from fastmcp.server.auth.providers.github import GitHubTokenVerifier  # noqa: E402
 from google.auth.credentials import AnonymousCredentials  # noqa: E402
 
+from garmlink import deps  # noqa: E402
 from garmlink.auth_provider import (  # noqa: E402
     AllowlistedGitHubTokenVerifier,
     build_auth_provider,
@@ -238,17 +239,29 @@ def _no_gcp_credentials():
 
 
 def test_complete_config_builds_a_provider_with_the_allowlist():
-    with _env(**{**GOOD_ENV, "GITHUB_ALLOWED_USERS": f"{ALLOWED}, second-user "}):
-        with _no_gcp_credentials():
-            provider = build_auth_provider()
-    assert provider is not None
-    # Reaching for a private attribute, which the production code deliberately
-    # avoids. In a test that is the right trade: if a fastmcp bump renames it,
-    # this fails in CI rather than the wiring breaking silently in production.
-    verifier = provider._token_validator
-    assert isinstance(verifier, AllowlistedGitHubTokenVerifier)
-    # Whitespace around comma-separated logins must not create phantom entries.
-    assert verifier._allowed == frozenset({ALLOWED, "second-user"})
+    try:
+        with _env(**{**GOOD_ENV, "GITHUB_ALLOWED_USERS": f"{ALLOWED}, second-user "}):
+            with _no_gcp_credentials():
+                provider = build_auth_provider()
+        assert provider is not None
+        # Reaching for private attributes, which the production code deliberately
+        # avoids. In a test that is the right trade: if a fastmcp bump renames one,
+        # this fails in CI rather than the wiring breaking silently in production.
+        verifier = provider._token_validator
+        assert isinstance(verifier, AllowlistedGitHubTokenVerifier)
+        # Whitespace around comma-separated logins must not create phantom entries.
+        assert verifier._allowed == frozenset({ALLOWED, "second-user"})
+        # server.py's lifespan closes whatever deps.get_oauth_store() returns on
+        # shutdown, so the builder registering anything other than the exact
+        # store it wired into the proxy would leak the real one or close a
+        # decoy — nothing else covered this wiring.
+        assert deps.get_oauth_store() is provider._client_storage
+    finally:
+        # build_auth_provider() registers the store as a side effect before
+        # constructing OAuthProxy. Production never undoes this (the process
+        # dies instead), but leaving it set here would leak a live FirestoreStore
+        # into every test that runs after this one in the same process.
+        deps.set_oauth_store(None)
 
 
 # ---------------------------------------------------------------------------
@@ -284,20 +297,35 @@ def test_public_route_surface_is_exactly_what_we_expect():
     with patch.object(GarminClient, "__init__", return_value=None):
         import garmlink.server as srv
 
-    with _env(**GOOD_ENV), _no_gcp_credentials():
-        provider = build_auth_provider()
-
-    original = srv.mcp.auth
     try:
-        srv.mcp.auth = provider
-        app = srv.mcp.http_app()
-        paths = {getattr(r, "path", None) for r in app.routes}
-    finally:
-        srv.mcp.auth = original
+        with _env(**GOOD_ENV), _no_gcp_credentials():
+            provider = build_auth_provider()
 
-    assert EXPECTED_PUBLIC <= paths, EXPECTED_PUBLIC - paths
-    assert "/readyz" in paths, "the diagnostic route should still be mounted"
-    assert "/mcp" in paths
+        original = srv.mcp.auth
+        try:
+            srv.mcp.auth = provider
+            app = srv.mcp.http_app()
+            paths = {getattr(r, "path", None) for r in app.routes}
+        finally:
+            srv.mcp.auth = original
+
+        # Exact equality, not a subset check: a subset check catches a route
+        # disappearing but never a NEW public route silently appearing, which is
+        # the exact failure mode this test exists for (a future fastmcp bump
+        # exposing something). "/mcp" carries RequireAuthMiddleware and "/readyz"
+        # is guarded separately by READYZ_TOKEN, so both are public at the route
+        # level and belong in the comparison set alongside EXPECTED_PUBLIC.
+        assert paths - {None} == EXPECTED_PUBLIC | {"/mcp", "/readyz"}, (
+            paths - {None}
+        )
+        # `|` makes the equality above insensitive to /mcp or /readyz *also*
+        # being listed in EXPECTED_PUBLIC (a redundant add is not a set change).
+        # EXPECTED_PUBLIC's own comment says /readyz belongs here as a route
+        # public for a *different* reason (READYZ_TOKEN, not the OAuth flow) —
+        # this catches that distinction eroding, which the equality above can't.
+        assert EXPECTED_PUBLIC.isdisjoint({"/mcp", "/readyz"}), EXPECTED_PUBLIC
+    finally:
+        deps.set_oauth_store(None)
 
 
 def test_readyz_is_not_wrapped_by_the_oauth_guard():
@@ -314,22 +342,66 @@ def test_readyz_is_not_wrapped_by_the_oauth_guard():
     with patch.object(GarminClient, "__init__", return_value=None):
         import garmlink.server as srv
 
-    with _env(**GOOD_ENV), _no_gcp_credentials():
-        provider = build_auth_provider()
-
-    original = srv.mcp.auth
     try:
-        srv.mcp.auth = provider
-        app = srv.mcp.http_app()
-        wrapped = {
-            getattr(r, "path", None)
-            for r in app.routes
-            if isinstance(getattr(r, "endpoint", None), RequireAuthMiddleware)
-        }
-    finally:
-        srv.mcp.auth = original
+        with _env(**GOOD_ENV), _no_gcp_credentials():
+            provider = build_auth_provider()
 
-    assert wrapped == {"/mcp"}, wrapped
+        original = srv.mcp.auth
+        try:
+            srv.mcp.auth = provider
+            app = srv.mcp.http_app()
+            wrapped = {
+                getattr(r, "path", None)
+                for r in app.routes
+                if isinstance(getattr(r, "endpoint", None), RequireAuthMiddleware)
+            }
+        finally:
+            srv.mcp.auth = original
+
+        assert wrapped == {"/mcp"}, wrapped
+    finally:
+        deps.set_oauth_store(None)
+
+
+def test_readyz_401s_on_the_real_app_without_a_token():
+    # test_logging.py's readyz tests build a bare Starlette app with just the
+    # /readyz route — none of mcp.http_app()'s middleware stack — and the route
+    # surface tests above only check that /readyz is *mounted*, not what it
+    # answers. So nothing exercised the guard on the app actually served in
+    # production; a 200 here would mean Garmin session state is public.
+    from unittest.mock import patch
+
+    from starlette.testclient import TestClient
+
+    from garmlink.client import GarminClient
+
+    with patch.object(GarminClient, "__init__", return_value=None):
+        import garmlink.server as srv
+
+    try:
+        with _env(**GOOD_ENV), _no_gcp_credentials():
+            provider = build_auth_provider()
+            readyz_token = resolve_readyz_token()
+
+        original_auth = srv.mcp.auth
+        original_token = srv._readyz_token
+        try:
+            srv.mcp.auth = provider
+            srv._readyz_token = readyz_token
+            client = TestClient(srv.mcp.http_app())
+
+            unauthenticated = client.get("/readyz")
+            assert unauthenticated.status_code == 401, unauthenticated.text
+
+            authenticated = client.get(
+                "/readyz", headers={"Authorization": f"Bearer {readyz_token}"}
+            )
+            assert authenticated.status_code != 401, authenticated.text
+        finally:
+            srv.mcp.auth = original_auth
+            srv._readyz_token = original_token
+    finally:
+        deps.set_oauth_store(None)
 
 
 def _run_all():

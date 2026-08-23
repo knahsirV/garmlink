@@ -486,6 +486,30 @@ def test_readyz_is_open_when_running_unauthenticated():
     assert client.get("/readyz").status_code == 503
 
 
+def test_readyz_rejects_a_non_ascii_authorization_header():
+    # Headers arrive as `str` decoded from latin-1 off the wire, so a header
+    # like "Bearer \xe9" is valid input here, not a programming error. Before
+    # the fix, `hmac.compare_digest` raised TypeError comparing two non-ASCII
+    # `str`s, which surfaced as an unhandled 500 outside the JSON log pipeline
+    # instead of the ordinary 401 every other bad credential gets.
+    #
+    # httpx's TestClient refuses to *send* a non-ASCII header value client-side
+    # (it raises UnicodeEncodeError before the request goes anywhere), so it
+    # cannot reproduce the wire behaviour this test is pinning. Building the
+    # Request directly, the way uvicorn decodes an ASGI scope's raw header
+    # bytes, is what actually gets a non-ASCII `str` to the handler.
+    from starlette.requests import Request
+
+    import garmlink.server as srv
+    srv._readyz_token = "r" * 64
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", "Bearer \xe9".encode("latin-1"))],
+    }
+    response = asyncio.run(srv.readyz(Request(scope)))
+    assert response.status_code == 401, response.body
+
+
 # ---------------------------------------------------------------------------
 # Third-party (fastmcp) log capture and redaction
 # ---------------------------------------------------------------------------
