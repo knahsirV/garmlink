@@ -38,8 +38,9 @@ PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(proje
 RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
 # --- secrets -----------------------------------------------------------------
-# GARMIN_EMAIL is prompted for; the token blob is read from disk and the bearer
-# token is generated. Nothing lands in shell history.
+# GARMIN_EMAIL and the GitHub OAuth credentials are prompted for, the token blob
+# is read from disk, and READYZ_TOKEN is generated. Nothing lands in shell
+# history.
 echo "==> Creating secrets"
 # $3 = "hidden" to suppress echo. Only use it for genuine secrets — a silent
 # prompt for a non-secret just looks like the script has hung.
@@ -86,15 +87,6 @@ else
   create_secret GARMIN_TOKENS_JSON "GARMIN_TOKENS_JSON (base64)" hidden
 fi
 
-# Generated rather than typed. Retrieve it later with:
-#   gcloud secrets versions access latest --secret=MCP_AUTH_TOKEN
-if gcloud secrets describe MCP_AUTH_TOKEN >/dev/null 2>&1; then
-  echo "    MCP_AUTH_TOKEN exists — keeping the current value"
-else
-  echo "    MCP_AUTH_TOKEN generated (64 hex chars)"
-  put_secret MCP_AUTH_TOKEN "$(openssl rand -hex 32)"
-fi
-
 # GitHub OAuth app credentials. Created at
 # https://github.com/settings/developers with callback
 # https://garmlink-moz6szqd6q-uc.a.run.app/auth/callback
@@ -112,7 +104,7 @@ else
 fi
 
 echo "==> Letting the Cloud Run runtime read those secrets"
-for s in GARMIN_EMAIL GARMIN_TOKENS_JSON MCP_AUTH_TOKEN GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET READYZ_TOKEN; do
+for s in GARMIN_EMAIL GARMIN_TOKENS_JSON GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET READYZ_TOKEN; do
   gcloud secrets add-iam-policy-binding "${s}" \
     --member="serviceAccount:${RUNTIME_SA}" \
     --role=roles/secretmanager.secretAccessor >/dev/null
@@ -267,10 +259,14 @@ Setup complete.
   service   ${SERVICE}
   deployer  ${DEPLOY_SA}
 
-Read your bearer token with:
-  gcloud secrets versions access latest --secret=MCP_AUTH_TOKEN --project=${PROJECT_ID}
+Push to main (or run the workflow manually) to deploy.
 
-Push to main (or run the workflow manually) to deploy. The service URL is
-printed at the end of the workflow run; put it in your Claude Desktop config
-as <url>/mcp with that token as the Authorization bearer value.
+Access is GitHub OAuth: add <url>/mcp as a custom connector in claude.ai, or
+`claude mcp add --transport http garmlink <url>/mcp`, and complete the browser
+flow. Only logins in GITHUB_ALLOWED_USERS are admitted. There is no bearer
+token to copy.
+
+Check the service without completing an OAuth flow:
+  gcloud secrets versions access latest --secret=READYZ_TOKEN --project=${PROJECT_ID}
+and send it as the bearer token to <url>/readyz.
 DONE
