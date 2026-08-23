@@ -113,15 +113,35 @@ workflow (or from step 4 above).
 
 ## Coaching Workflows
 
-Four guided workflows ship with the server as MCP prompts, so they work in any
+Eight guided workflows ship with the server as MCP prompts, so they work in any
 MCP client rather than only in this project directory.
 
 | Prompt | Purpose |
 |---|---|
 | `morning_check` | Daily readiness briefing (HRV, sleep, body battery) |
 | `analyze_week` | Weekly training load and sport balance review |
+| `load_check` | Acute:chronic ratio, ramp rate and injury risk |
+| `session_debrief` | Split-by-split review of one session — pacing, decoupling, execution |
 | `race_readiness` | Pre-race fitness assessment across all disciplines |
+| `adapt_plan` | Reconcile today's planned session against actual readiness |
+| `build_training_block` | Design a multi-week base block → schedules it on Garmin |
 | `create_workout_guide` | Guided structured workout builder → pushes to Garmin |
+
+The cross-sport ones (`analyze_week`, `load_check`, `race_readiness`,
+`build_training_block`) always report swim, bike and run together, because
+training load does not partition by sport. The per-session ones
+(`session_debrief`, `create_workout_guide`) branch on sport, because the tools
+do — a swim needs stroke and SWOLF data, a run needs running dynamics.
+
+`adapt_plan` and `build_training_block` can write to the Garmin calendar. Both
+show the proposed change and wait for an explicit yes first.
+
+Indoor bike sessions are not built as Garmin workouts — they are ridden in Zwift
+under ERG, so the prompts recommend a workout from Zwift's own library instead.
+They must confirm by web search that the workout is in a **current** collection
+first: whatsonzwift.com marks collections Zwift deleted in its October 2023
+library reorg as `(legacy)`, and the same workout name can appear in both a
+current and a legacy collection. Outdoor rides still go through `create_workout`.
 
 How they surface depends on the client: Claude Desktop lists them in its prompt
 menu, and Claude Code exposes them as `/mcp__garmlink__morning_check` and so on.
@@ -177,7 +197,7 @@ JSON, and the platform lifts `severity` into the log viewer, so filtering by
 error works:
 
 ```
-{"severity":"INFO","message":"startup","tools":45,"prompts":4,"token_source":"secret","auth":"github_oauth"}
+{"severity":"INFO","message":"startup","tools":48,"prompts":8,"token_source":"secret","auth":"github_oauth"}
 {"severity":"INFO","message":"tool.call","name":"get_daily_summary","args":{"date":"2026-08-20"},"outcome":"ok","dur_ms":214.0,"cache":"0h/1m"}
 {"severity":"WARNING","message":"auth.reject","path":"/mcp","reason":"bad_token"}
 {"severity":"WARNING","message":"garmin.retry","method":"get_stats","attempt":1,"outcome":"rate_limited"}

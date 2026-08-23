@@ -15,6 +15,7 @@ Runs standalone (`python tests/test_prompts.py`) or under pytest.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import re
 import sys
 from pathlib import Path
@@ -23,7 +24,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from fastmcp import Client  # noqa: E402
 
-EXPECTED = {"morning_check", "analyze_week", "race_readiness", "create_workout_guide"}
+EXPECTED = {
+    "morning_check", "analyze_week", "race_readiness", "create_workout_guide",
+    "session_debrief", "load_check", "adapt_plan", "build_training_block",
+}
+
+# Which backticked names are meant to be tools. The check used to match only
+# `get_` plus a two-name allowlist, so every write tool the adjust prompts call
+# went unverified. Prefixes alone are not enough either: a typo lands *in* the
+# prefix as often as after it, and `unshcedule_workout` matches none of these.
+TOOL_PREFIXES = (
+    "get_", "create_", "update_", "schedule_", "unschedule_",
+    "upload_", "set_", "suggest_",
+)
+
+# ...so anything close to a real tool name is treated as an attempt at one, which
+# is what actually catches a typo. Measured against the current prompts: the
+# schema field names they backtick (`duration_seconds`, `target_value`, ...) sit
+# far below this threshold, while every typo tried lands above it.
+NEAR_MISS_CUTOFF = 0.85
+
+
+def _looks_like_a_tool(ref: str, tool_names: set[str]) -> bool:
+    return bool(
+        ref.startswith(TOOL_PREFIXES)
+        or difflib.get_close_matches(ref, tool_names, n=1, cutoff=NEAR_MISS_CUTOFF)
+    )
 
 
 def _server():
@@ -79,9 +105,8 @@ def test_prompts_only_reference_tools_that_exist():
                 )
                 # Tools are referenced in backticks: `get_wellness_snapshot`
                 for ref in re.findall(r"`([a-z][a-z0-9_]{3,})`", text):
-                    if ref.startswith("get_") or ref in {"create_workout", "suggest_recovery"}:
-                        if ref not in tool_names:
-                            problems.append(f"{p.name} references unknown tool `{ref}`")
+                    if ref not in tool_names and _looks_like_a_tool(ref, tool_names):
+                        problems.append(f"{p.name} references unknown tool `{ref}`")
             return problems
 
     problems = asyncio.run(run())

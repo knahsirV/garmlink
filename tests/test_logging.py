@@ -599,7 +599,7 @@ def test_startup_is_logged_with_the_served_surface():
     starts = logs.with_message("startup")
     assert starts, "startup must leave a trace"
     assert starts[0].fields["tools"] == 48, starts[0].fields
-    assert starts[0].fields["prompts"] == 4, starts[0].fields
+    assert starts[0].fields["prompts"] == 8, starts[0].fields
     # This suite runs with ALLOW_UNAUTHENTICATED=1, so auth is disabled and no
     # oauth store was ever registered — the local file store is what's live.
     assert starts[0].fields["auth"] == "disabled", starts[0].fields
