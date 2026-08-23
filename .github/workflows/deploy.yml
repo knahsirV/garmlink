@@ -42,6 +42,13 @@ jobs:
           python tests/test_critical_fixes.py
           python tests/test_auth_lifecycle.py
 
+      # The allowlist is the whole of the access control after the OAuth
+      # cutover: GitHubTokenVerifier accepts any token minted for our app, so
+      # without this the fail-closed config and the public route surface are
+      # unprotected in CI.
+      - name: OAuth allowlist, fail-closed config, and public route surface
+        run: python tests/test_auth_provider.py
+
       - name: Tool dispatch through the mounted routers
         env:
           GARMIN_EMAIL: test@example.invalid
@@ -87,7 +94,8 @@ jobs:
             --memory=512Mi \
             --cpu=1 \
             --timeout=3600 \
-            --set-secrets=GARMIN_EMAIL=GARMIN_EMAIL:latest,GARMIN_TOKENS_JSON=GARMIN_TOKENS_JSON:latest,MCP_AUTH_TOKEN=MCP_AUTH_TOKEN:latest \
+            --set-secrets=GARMIN_EMAIL=GARMIN_EMAIL:latest,GARMIN_TOKENS_JSON=GARMIN_TOKENS_JSON:latest,GITHUB_CLIENT_ID=GITHUB_CLIENT_ID:latest,GITHUB_CLIENT_SECRET=GITHUB_CLIENT_SECRET:latest,READYZ_TOKEN=READYZ_TOKEN:latest \
+            --set-env-vars=PUBLIC_BASE_URL=https://garmlink-moz6szqd6q-uc.a.run.app,GITHUB_ALLOWED_USERS=knahsirV \
             --quiet
 
       - name: Show service URL
