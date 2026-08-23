@@ -251,6 +251,87 @@ def test_complete_config_builds_a_provider_with_the_allowlist():
     assert verifier._allowed == frozenset({ALLOWED, "second-user"})
 
 
+# ---------------------------------------------------------------------------
+# Public route surface
+# ---------------------------------------------------------------------------
+
+# Everything reachable without a token once OAuth is on. The seven OAuth routes
+# MUST be public — discovery and the flow itself run before the client holds a
+# token — and /health must stay public for the platform's liveness check.
+# /readyz must NOT be here: it reports Garmin session state, and FastMCP appends
+# custom routes outside RequireAuthMiddleware, so it goes public by default.
+EXPECTED_PUBLIC = {
+    "/health",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-protected-resource/mcp",
+    "/authorize",
+    "/token",
+    "/register",
+    "/auth/callback",
+    "/consent",
+}
+
+
+def test_public_route_surface_is_exactly_what_we_expect():
+    from unittest.mock import patch
+
+    from garmlink.client import GarminClient
+
+    # Building the app never runs the lifespan, so no GarminClient is
+    # constructed here. The patch is belt-and-braces against gotcha 2: if this
+    # test ever grows to exercise the lifespan, it must not reach the live
+    # Garmin API using the real tokens sitting at ~/.garminconnect.
+    with patch.object(GarminClient, "__init__", return_value=None):
+        import garmlink.server as srv
+
+    with _env(**GOOD_ENV), _no_gcp_credentials():
+        provider = build_auth_provider()
+
+    original = srv.mcp.auth
+    try:
+        srv.mcp.auth = provider
+        app = srv.mcp.http_app()
+        paths = {getattr(r, "path", None) for r in app.routes}
+    finally:
+        srv.mcp.auth = original
+
+    assert EXPECTED_PUBLIC <= paths, EXPECTED_PUBLIC - paths
+    assert "/readyz" in paths, "the diagnostic route should still be mounted"
+    assert "/mcp" in paths
+
+
+def test_readyz_is_not_wrapped_by_the_oauth_guard():
+    # This is the trap, stated as an assertion: FastMCP wraps ONLY /mcp in
+    # RequireAuthMiddleware and appends custom routes after it, so /readyz
+    # carries no OAuth enforcement and must rely on its own READYZ_TOKEN guard.
+    # If a future fastmcp starts wrapping custom routes, this fails loudly and
+    # the READYZ_TOKEN guard can be reconsidered — it does not fail silently.
+    from unittest.mock import patch
+
+    from fastmcp.server.auth.middleware import RequireAuthMiddleware
+    from garmlink.client import GarminClient
+
+    with patch.object(GarminClient, "__init__", return_value=None):
+        import garmlink.server as srv
+
+    with _env(**GOOD_ENV), _no_gcp_credentials():
+        provider = build_auth_provider()
+
+    original = srv.mcp.auth
+    try:
+        srv.mcp.auth = provider
+        app = srv.mcp.http_app()
+        wrapped = {
+            getattr(r, "path", None)
+            for r in app.routes
+            if isinstance(getattr(r, "endpoint", None), RequireAuthMiddleware)
+        }
+    finally:
+        srv.mcp.auth = original
+
+    assert wrapped == {"/mcp"}, wrapped
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
