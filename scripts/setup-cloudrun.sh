@@ -31,7 +31,8 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   secretmanager.googleapis.com \
-  iamcredentials.googleapis.com
+  iamcredentials.googleapis.com \
+  firestore.googleapis.com
 
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
 RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
@@ -94,12 +95,72 @@ else
   put_secret MCP_AUTH_TOKEN "$(openssl rand -hex 32)"
 fi
 
+# GitHub OAuth app credentials. Created at
+# https://github.com/settings/developers with callback
+# https://garmlink-moz6szqd6q-uc.a.run.app/auth/callback
+create_secret GITHUB_CLIENT_ID "GITHUB_CLIENT_ID (e.g. Ov23li...)"
+create_secret GITHUB_CLIENT_SECRET "GITHUB_CLIENT_SECRET" hidden
+
+# Guards /readyz only. Deliberately NOT the OAuth token: an OAuth access
+# token requires a browser flow, and /readyz has to stay reachable from a
+# terminal precisely when the OAuth layer is the thing that is broken.
+if gcloud secrets describe READYZ_TOKEN >/dev/null 2>&1; then
+  echo "    READYZ_TOKEN exists — keeping the current value"
+else
+  echo "    READYZ_TOKEN generated (64 hex chars)"
+  put_secret READYZ_TOKEN "$(openssl rand -hex 32)"
+fi
+
 echo "==> Letting the Cloud Run runtime read those secrets"
-for s in GARMIN_EMAIL GARMIN_TOKENS_JSON MCP_AUTH_TOKEN; do
+for s in GARMIN_EMAIL GARMIN_TOKENS_JSON MCP_AUTH_TOKEN GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET READYZ_TOKEN; do
   gcloud secrets add-iam-policy-binding "${s}" \
     --member="serviceAccount:${RUNTIME_SA}" \
     --role=roles/secretmanager.secretAccessor >/dev/null
 done
+
+# --- firestore (OAuth state) -------------------------------------------------
+# The default OAuth client store is a file tree on local disk. This service
+# scales to zero, so a cold start would wipe every DCR registration and
+# refresh-token mapping — in claude.ai that surfaces as "randomly asks me to
+# reconnect". Firestore survives cold starts and is correct across instances.
+echo "==> Creating the Firestore database"
+# Version skew, and it bites harder than it looks. `databases describe` does
+# not exist at all on older SDKs (426 has only `create`), so the existence
+# check silently fails there and we fall through to create. Worse, on those
+# SDKs the *GA* create routes through the App Engine Admin API — it fails
+# unless appengine.googleapis.com is enabled, and enabling it plants a
+# permanent App Engine app in the project. The beta track on the same SDKs
+# talks to the Firestore API directly, which is what we actually want. Probe
+# for GA's `--type` as the signal that GA is on the Firestore API path.
+if gcloud firestore databases describe --database='(default)' >/dev/null 2>&1; then
+  echo "    (default) exists"
+else
+  if gcloud firestore databases create --help 2>/dev/null | grep -q -- '--type'; then
+    fs_cmd=(gcloud firestore databases create)
+  else
+    fs_cmd=(gcloud beta firestore databases create)
+  fi
+  # tee rather than capture: this command can prompt for confirmation and can
+  # take a couple of minutes, and command substitution would hide both — the
+  # prompt included, leaving the script apparently hung on no output at all.
+  fs_log="$(mktemp)"
+  if "${fs_cmd[@]}" --location="${REGION}" --type=firestore-native 2>&1 | tee "${fs_log}"; then
+    echo "    (default) created in ${REGION}"
+  elif grep -qiE 'already exists|ALREADY_EXISTS' "${fs_log}"; then
+    # Without `describe`, an already-exists error is the only way to find out.
+    # Swallowing it is what keeps re-runs of this script idempotent.
+    echo "    (default) exists"
+  else
+    rm -f "${fs_log}"
+    exit 1
+  fi
+  rm -f "${fs_log}"
+fi
+
+echo "==> Letting the Cloud Run runtime read and write Firestore"
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${RUNTIME_SA}" \
+  --role=roles/datastore.user >/dev/null
 
 # --- deploy service account --------------------------------------------------
 echo "==> Creating deploy service account"
