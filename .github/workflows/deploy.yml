@@ -61,6 +61,14 @@ jobs:
           ALLOW_UNAUTHENTICATED: '1'
         run: python tests/test_prompts.py
 
+      # The previous create_workout shipped malformed Garmin payloads for months
+      # precisely because nothing exercised it. Keep that covered in CI.
+      - name: Workout builder payload shape
+        env:
+          GARMIN_EMAIL: test@example.invalid
+          ALLOW_UNAUTHENTICATED: '1'
+        run: python tests/test_workout_builder.py
+
       - name: Logging and redaction
         env:
           GARMIN_EMAIL: test@example.invalid
