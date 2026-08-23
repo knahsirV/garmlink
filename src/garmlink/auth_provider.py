@@ -135,6 +135,16 @@ def build_auth_provider() -> AuthProvider | None:
         token_verifier=AllowlistedGitHubTokenVerifier(
             allowed_logins=allowed,
             required_scopes=["user"],
+            # Without this, `verify_token` hits api.github.com/user and
+            # .../user/repos on *every* request (OAuthProxy.load_access_token
+            # runs it per call), which is two round-trips per tool call and
+            # caps the service at ~2,500 MCP requests/hour against GitHub's
+            # 5,000/hr limit. Caching does NOT weaken the allowlist: `_allowed`
+            # is re-checked in `verify_token` above on every call regardless of
+            # whether the parent returned a cached `AccessToken`, so a login
+            # removed from the allowlist is still denied on its very next
+            # request. Do not "fix" this back to None for security reasons.
+            cache_ttl_seconds=300,
         ),
         base_url=values["PUBLIC_BASE_URL"],
         client_storage=store,
