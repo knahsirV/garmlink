@@ -6,7 +6,6 @@ Runs standalone (`python tests/test_critical_fixes.py`) or under pytest.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -14,13 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from garmlink.cache import TTLCache  # noqa: E402
 from garmlink.client import GarminClient  # noqa: E402
-from garmlink.server import (  # noqa: E402
-    MIN_TOKEN_LENGTH,
-    BearerAuthMiddleware,
-    resolve_auth_token,
-)
-
-GOOD_TOKEN = "t" * MIN_TOKEN_LENGTH
 
 
 class _FakeApi:
@@ -43,96 +35,6 @@ def _client() -> tuple[GarminClient, _FakeApi]:
     api = _FakeApi()
     c._api = api
     return c, api
-
-
-# --- Critical 1: auth fails closed -----------------------------------------
-
-def test_missing_token_refuses_to_start(monkeypatch=None):
-    old = {k: os.environ.get(k) for k in ("MCP_AUTH_TOKEN", "ALLOW_UNAUTHENTICATED")}
-    try:
-        os.environ.pop("MCP_AUTH_TOKEN", None)
-        os.environ.pop("ALLOW_UNAUTHENTICATED", None)
-        try:
-            resolve_auth_token()
-        except RuntimeError as exc:
-            assert "MCP_AUTH_TOKEN is required" in str(exc)
-        else:
-            raise AssertionError("missing MCP_AUTH_TOKEN must abort startup")
-
-        # Empty / whitespace-only is treated as missing, not as "open mode".
-        os.environ["MCP_AUTH_TOKEN"] = "   "
-        try:
-            resolve_auth_token()
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("blank MCP_AUTH_TOKEN must abort startup")
-
-        # Short tokens are rejected.
-        os.environ["MCP_AUTH_TOKEN"] = "short"
-        try:
-            resolve_auth_token()
-        except RuntimeError as exc:
-            assert "at least" in str(exc)
-        else:
-            raise AssertionError("short MCP_AUTH_TOKEN must abort startup")
-
-        # A real token is accepted.
-        os.environ["MCP_AUTH_TOKEN"] = GOOD_TOKEN
-        assert resolve_auth_token() == GOOD_TOKEN
-
-        # Opting out is explicit and deliberate.
-        os.environ.pop("MCP_AUTH_TOKEN")
-        os.environ["ALLOW_UNAUTHENTICATED"] = "1"
-        assert resolve_auth_token() is None
-    finally:
-        for k, v in old.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-
-def test_middleware_rejects_empty_token():
-    try:
-        BearerAuthMiddleware(app=None, token="")
-    except RuntimeError:
-        return
-    raise AssertionError("middleware must refuse to construct without a token")
-
-
-def test_middleware_auth_decisions():
-    mw = BearerAuthMiddleware(app=None, token=GOOD_TOKEN)
-
-    class _URL:
-        def __init__(self, path):
-            self.path = path
-
-    class _Req:
-        def __init__(self, path, auth=None):
-            self.url = _URL(path)
-            self.headers = {"Authorization": auth} if auth else {}
-
-    async def passthrough(_req):
-        return "PASSED"
-
-    async def run():
-        # /health is open so the platform's health check works.
-        assert await mw.dispatch(_Req("/health"), passthrough) == "PASSED"
-        # /readyz is NOT open — it exposes internal Garmin session state.
-        resp = await mw.dispatch(_Req("/readyz"), passthrough)
-        assert getattr(resp, "status_code", None) == 401, "/readyz must require auth"
-        assert await mw.dispatch(
-            _Req("/readyz", f"Bearer {GOOD_TOKEN}"), passthrough
-        ) == "PASSED"
-        # No header, wrong token, and near-miss token are all rejected.
-        for auth in (None, "Bearer wrong", f"Bearer {GOOD_TOKEN[:-1]}x", GOOD_TOKEN):
-            resp = await mw.dispatch(_Req("/mcp", auth), passthrough)
-            assert getattr(resp, "status_code", None) == 401, (auth, resp)
-        # Correct token passes.
-        assert await mw.dispatch(_Req("/mcp", f"Bearer {GOOD_TOKEN}"), passthrough) == "PASSED"
-
-    asyncio.run(run())
 
 
 # --- Critical 3: unhashable args must not raise -----------------------------

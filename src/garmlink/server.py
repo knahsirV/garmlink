@@ -11,13 +11,12 @@ from typing import AsyncIterator
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .auth_provider import build_auth_provider, resolve_readyz_token
 from .client import GarminClient
-from .deps import get_garmin_or_none, set_client
+from .deps import get_garmin_or_none, get_oauth_store, set_client, set_oauth_store
 from .logs import ToolCallLoggingMiddleware, logger, setup_logging
 from .tools.daily import mcp as daily_mcp
 from .tools.activities import mcp as activities_mcp
@@ -32,76 +31,6 @@ from .tools.insights import mcp as insights_mcp
 from .prompts import mcp as coaching_mcp
 
 load_dotenv()
-
-
-# ---------------------------------------------------------------------------
-# Bearer-auth HTTP middleware
-# ---------------------------------------------------------------------------
-
-MIN_TOKEN_LENGTH = 32
-
-
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Reject requests that don't carry the expected bearer token.
-
-    The token is required: `resolve_auth_token()` refuses to start the server
-    without one, so this middleware never runs in an open mode. Only /health is
-    exempt, so Fly's health check works without credentials.
-    """
-
-    def __init__(self, app, token: str) -> None:
-        super().__init__(app)
-        if not token:
-            raise RuntimeError("BearerAuthMiddleware requires a non-empty token")
-        self._token = token
-
-    async def dispatch(self, request: Request, call_next):
-        # Always allow the health-check endpoint through.
-        if request.url.path == "/health":
-            return await call_next(request)
-
-        auth = request.headers.get("Authorization", "")
-        # compare_digest keeps the comparison time independent of how many
-        # leading bytes the presented token got right.
-        if not auth.startswith("Bearer ") or not hmac.compare_digest(
-            auth[7:], self._token
-        ):
-            # The presented credential is deliberately never logged: it is
-            # either a near-miss of the real secret or somebody else's, and a
-            # log stream is a bad place for both. Only the reason is recorded.
-            reason = "missing_bearer_prefix" if not auth.startswith("Bearer ") else "bad_token"
-            logger.warning("auth.reject", extra={"fields": {
-                "path": request.url.path, "reason": reason,
-            }})
-            return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-        return await call_next(request)
-
-
-def resolve_auth_token() -> str | None:
-    """Return the bearer token, or None when explicitly running unauthenticated.
-
-    Fails closed: a missing or too-short MCP_AUTH_TOKEN aborts startup rather
-    than silently serving personal health data to anyone who finds the URL.
-    Local development can opt out with ALLOW_UNAUTHENTICATED=1, which is loud
-    and deliberate.
-    """
-    token = os.getenv("MCP_AUTH_TOKEN", "").strip()
-    if not token:
-        if os.getenv("ALLOW_UNAUTHENTICATED") == "1":
-            return None
-        raise RuntimeError(
-            "MCP_AUTH_TOKEN is required. Generate one with "
-            "`python -c 'import secrets; print(secrets.token_urlsafe(32))'` and set it "
-            "(Fly: `flyctl secrets set MCP_AUTH_TOKEN=...`). "
-            "To run without auth on localhost, set ALLOW_UNAUTHENTICATED=1."
-        )
-    if len(token) < MIN_TOKEN_LENGTH:
-        raise RuntimeError(
-            f"MCP_AUTH_TOKEN must be at least {MIN_TOKEN_LENGTH} characters "
-            f"(got {len(token)})."
-        )
-    return token
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +80,11 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
         # Which token source won matters: a deploy that silently fell back to
         # the local tokenstore would authenticate as nobody and fail lazily.
         "token_source": "secret" if tokens_b64 else "local_tokenstore",
-        "auth": "disabled" if os.getenv("ALLOW_UNAUTHENTICATED") == "1" else "bearer",
+        "auth": "disabled" if os.getenv("ALLOW_UNAUTHENTICATED") == "1" else "github_oauth",
+        # Same reasoning as token_source: a deploy that silently fell back to
+        # the ephemeral file store looks healthy and then forces a reconnect
+        # after every cold start.
+        "storage": "file" if get_oauth_store() is None else "firestore",
     }})
 
     try:
@@ -160,6 +93,11 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
         logger.info("shutdown")
         set_client(None)
         client.close()
+        store = get_oauth_store()
+        if store is not None:
+            # Safe whether or not the store ever opened its client.
+            await store.close()
+            set_oauth_store(None)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +129,10 @@ mcp.mount(coaching_mcp)
 mcp.add_middleware(ToolCallLoggingMiddleware())
 
 
+# Set by main(). None means ALLOW_UNAUTHENTICATED=1, and /readyz is open.
+_readyz_token: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Health endpoint
 # ---------------------------------------------------------------------------
@@ -210,11 +152,30 @@ async def health(request: Request) -> JSONResponse:
 async def readyz(request: Request) -> JSONResponse:
     """Garmin session state, for diagnosing a deploy.
 
-    Sits behind the bearer token (only /health is exempt) because it exposes
-    internal state. Reports only — it never triggers an authentication attempt,
-    so before the first tool call it honestly says "never". Returns 503 when the
-    last attempt failed so `curl -f` is meaningful; nothing gates on it.
+    Guarded by READYZ_TOKEN rather than by OAuth. FastMCP's RequireAuthMiddleware
+    wraps only the /mcp route — custom routes are registered outside it — so this
+    would otherwise be public the moment auth moved to OAuth, exposing Garmin
+    session state to anyone who guessed the path.
+
+    A separate secret, not the OAuth token, because an OAuth access token needs
+    a browser flow to obtain and this endpoint has to answer from a terminal
+    exactly when the OAuth layer is what has broken.
+
+    Reports only — it never triggers an authentication attempt, so before the
+    first tool call it honestly says "never". Returns 503 when the last attempt
+    failed so `curl -f` is meaningful; nothing gates on it.
     """
+    if _readyz_token is not None:
+        presented = request.headers.get("Authorization", "")
+        if not presented.startswith("Bearer ") or not hmac.compare_digest(
+            presented[7:], _readyz_token
+        ):
+            # The presented credential is deliberately never logged.
+            logger.warning("auth.reject", extra={"fields": {
+                "path": "/readyz", "reason": "bad_readyz_token",
+            }})
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
     client = get_garmin_or_none()
     if client is None:
         return JSONResponse({"garmin": "unavailable"}, status_code=503)
@@ -230,19 +191,24 @@ async def readyz(request: Request) -> JSONResponse:
 def main() -> None:
     import uvicorn
 
+    global _readyz_token
+
     setup_logging()
 
     port = int(os.getenv("PORT", "8000"))
-    auth_token = resolve_auth_token()
 
-    if auth_token is None:
+    # Both fail closed on missing configuration, and both run before the app is
+    # built so a misconfigured deploy dies at startup rather than serving.
+    auth = build_auth_provider()
+    _readyz_token = resolve_readyz_token()
+
+    if auth is None:
         logger.warning(
             "ALLOW_UNAUTHENTICATED=1 — serving with NO authentication. "
             "Never do this on a public address."
         )
-        middleware = []
-    else:
-        middleware = [Middleware(BearerAuthMiddleware, token=auth_token)]
-    http_app = mcp.http_app(middleware=middleware)
+    # `http_app()` reads `self.auth` at call time, so assigning it here keeps
+    # `mcp` importable without GitHub credentials — which the test suite needs.
+    mcp.auth = auth
 
-    uvicorn.run(http_app, host="0.0.0.0", port=port)
+    uvicorn.run(mcp.http_app(), host="0.0.0.0", port=port)

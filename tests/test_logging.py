@@ -34,14 +34,12 @@ from garminconnect import (  # noqa: E402
     GarminConnectTooManyRequestsError,
 )
 from starlette.applications import Starlette  # noqa: E402
-from starlette.responses import JSONResponse  # noqa: E402
 from starlette.routing import Route  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 import garmlink.client as client_mod  # noqa: E402
 from garmlink.client import GarminClient  # noqa: E402
 import garmlink.server as server_mod  # noqa: E402
-from garmlink.server import BearerAuthMiddleware  # noqa: E402
 
 from garmlink.logs import (  # noqa: E402
     JsonFormatter,
@@ -440,61 +438,52 @@ def test_failed_login_is_logged_without_leaking_credentials():
 
 
 # ---------------------------------------------------------------------------
-# Bearer-auth diagnostics
+# /readyz diagnostics
 # ---------------------------------------------------------------------------
 
-def _auth_test_client(token: str) -> TestClient:
-    app = Starlette(routes=[
-        Route("/mcp", lambda request: JSONResponse({"ok": True})),
-        Route("/health", lambda request: JSONResponse({"status": "ok"})),
-    ])
-    app.add_middleware(BearerAuthMiddleware, token=token)
+def _readyz_client(token: str | None) -> TestClient:
+    import garmlink.server as srv
+    srv._readyz_token = token
+    app = Starlette(routes=[Route("/readyz", srv.readyz)])
     return TestClient(app)
 
 
-def test_rejected_token_is_logged():
-    client = _auth_test_client("t" * 40)
-
+def test_readyz_rejects_a_missing_token():
+    client = _readyz_client("r" * 64)
     with _CapturedLogs() as logs:
-        assert client.get("/mcp", headers={"Authorization": "Bearer wrong"}).status_code == 401
-
+        assert client.get("/readyz").status_code == 401
     rejects = logs.with_message("auth.reject")
     assert rejects, "a 401 must be explained in the logs"
     assert rejects[0].levelno == logging.WARNING, rejects[0].levelname
-    assert rejects[0].fields["path"] == "/mcp", rejects[0].fields
+    assert rejects[0].fields["path"] == "/readyz", rejects[0].fields
+    assert rejects[0].fields["reason"] == "bad_readyz_token", rejects[0].fields
 
 
-def test_rejection_log_never_contains_the_presented_token():
+def test_readyz_rejection_never_contains_the_presented_token():
     # Logging what someone presented would put a near-miss of the real secret,
     # or someone else's credential, into the log stream permanently.
-    client = _auth_test_client("t" * 40)
+    client = _readyz_client("r" * 64)
     presented = "abcdefghijklmnopqrstuvwxyz123456"
-
     with _CapturedLogs() as logs:
-        client.get("/mcp", headers={"Authorization": f"Bearer {presented}"})
-
-    assert presented not in str(logs.with_message("auth.reject")[0].fields)
-
-
-def test_successful_requests_are_not_logged_as_rejections():
-    token = "t" * 40
-    client = _auth_test_client(token)
-
-    with _CapturedLogs() as logs:
-        assert client.get("/mcp", headers={"Authorization": f"Bearer {token}"}).status_code == 200
-
-    assert not logs.with_message("auth.reject")
+        client.get("/readyz", headers={"Authorization": f"Bearer {presented}"})
+    for record in logs.records:
+        assert presented not in str(getattr(record, "fields", {})), record.fields
+        assert presented not in record.getMessage()
 
 
-def test_health_check_is_not_logged_as_a_rejection():
-    # /health is polled constantly by the platform; logging it would drown
-    # everything else.
-    client = _auth_test_client("t" * 40)
+def test_readyz_admits_the_correct_token():
+    token = "r" * 64
+    client = _readyz_client(token)
+    response = client.get("/readyz", headers={"Authorization": f"Bearer {token}"})
+    # No GarminClient is registered in this harness, so /readyz reports
+    # "unavailable" — the point is that it got past the guard rather than 401.
+    assert response.status_code == 503, response.text
+    assert response.json() == {"garmin": "unavailable"}, response.text
 
-    with _CapturedLogs() as logs:
-        assert client.get("/health").status_code == 200
 
-    assert not logs.with_message("auth.reject")
+def test_readyz_is_open_when_running_unauthenticated():
+    client = _readyz_client(None)
+    assert client.get("/readyz").status_code == 503
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +576,10 @@ def test_startup_is_logged_with_the_served_surface():
     assert starts, "startup must leave a trace"
     assert starts[0].fields["tools"] == 45, starts[0].fields
     assert starts[0].fields["prompts"] == 4, starts[0].fields
+    # This suite runs with ALLOW_UNAUTHENTICATED=1, so auth is disabled and no
+    # oauth store was ever registered — the local file store is what's live.
+    assert starts[0].fields["auth"] == "disabled", starts[0].fields
+    assert starts[0].fields["storage"] == "file", starts[0].fields
 
 
 def _run_all():
