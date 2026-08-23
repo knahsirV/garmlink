@@ -102,16 +102,34 @@ class _Order:
 # Targets
 # ---------------------------------------------------------------------------
 
-def _target_dict(type_id: int, key: str, one: float, two: float | None = None) -> dict:
+def _target_dict(
+    type_id: int,
+    key: str,
+    one: float | None = None,
+    two: float | None = None,
+    zone: int | None = None,
+) -> tuple[dict, dict]:
+    """Return the targetType object and the value fields that go BESIDE it.
+
+    Garmin keeps `targetValueOne` / `targetValueTwo` / `zoneNumber` as siblings
+    of `targetType` on the step, not inside it. Nesting them there is silently
+    accepted and silently dropped: the workout comes back with the right target
+    *type* and no intensity at all — "8 minutes" instead of "8 minutes in zone
+    4". Confirmed by round-tripping a real workout through Garmin.
+    """
     target: dict[str, Any] = {
         "workoutTargetTypeId": type_id,
         "workoutTargetTypeKey": key,
         "displayOrder": type_id,
-        "targetValueOne": one,
     }
+    extras: dict[str, Any] = {}
+    if zone is not None:
+        extras["zoneNumber"] = int(zone)
+    if one is not None:
+        extras["targetValueOne"] = one
     if two is not None:
-        target["targetValueTwo"] = two
-    return target
+        extras["targetValueTwo"] = two
+    return target, extras
 
 
 def _parse_pace(value: Any, denominator: str) -> float:
@@ -141,13 +159,16 @@ def _parse_pace(value: Any, denominator: str) -> float:
     return metres / total
 
 
-def _build_target(step: dict, sport: str) -> dict | None:
-    """Return a targetType dict, or None to let the builder default to no.target."""
+def _build_target(step: dict, sport: str) -> tuple[dict | None, dict]:
+    """Return (targetType, step-level value fields).
+
+    A None targetType lets the library builder fall back to no.target.
+    """
     target_type = str(step.get("target_type") or "open").lower()
     value = step.get("target_value")
 
     if target_type in ("open", "none", "") or value is None:
-        return None
+        return None, {}
 
     if target_type in ("heart_rate_zone", "power_zone"):
         type_id = (
@@ -164,7 +185,8 @@ def _build_target(step: dict, sport: str) -> dict | None:
                 )
             low, high = sorted(float(v) for v in value)
             return _target_dict(type_id, key, low, high)
-        return _target_dict(type_id, key, int(value))
+        # A bare number is a zone index, which Garmin reads off zoneNumber.
+        return _target_dict(type_id, key, zone=int(value))
 
     if target_type == "cadence":
         if isinstance(value, (list, tuple)):
@@ -227,7 +249,7 @@ def _build_step(step: Any, order: _Order, sport: str) -> ExecutableStep | Repeat
         )
 
     my_order = order.next()
-    target = _build_target(step, sport)
+    target, target_values = _build_target(step, sport)
 
     reps = step.get("reps")
     if reps is not None:
@@ -272,6 +294,9 @@ def _build_step(step: Any, order: _Order, sport: str) -> ExecutableStep | Repeat
         )
 
     built.stepType = _step_type_dict(step_type)
+    # Set beside targetType, not inside it — see _target_dict.
+    for field, value in target_values.items():
+        setattr(built, field, value)
     return built
 
 
@@ -294,8 +319,8 @@ def _node_seconds(node: ExecutableStep | RepeatGroup, sport: str) -> float:
     if condition == ConditionType.DISTANCE:
         target = node.targetType or {}
         if target.get("workoutTargetTypeId") == TargetType.PACE_ZONE:
-            one = float(target.get("targetValueOne") or 0)
-            two = float(target.get("targetValueTwo") or one)
+            one = float(getattr(node, "targetValueOne", 0) or 0)
+            two = float(getattr(node, "targetValueTwo", 0) or one)
             speed = (one + two) / 2 if (one or two) else 0.0
         else:
             speed = 0.0

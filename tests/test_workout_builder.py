@@ -111,11 +111,11 @@ def test_pace_target_converts_to_metres_per_second():
         {"type": "interval", "duration_seconds": 1200,
          "target_type": "pace", "target_value": "4:00"},
     ])
-    target = _steps(workout)[0]["targetType"]
-    assert target["workoutTargetTypeId"] == 6, target  # TargetType.PACE_ZONE
-    assert target["workoutTargetTypeKey"] == "pace.zone", target
+    step = _steps(workout)[0]
+    assert step["targetType"]["workoutTargetTypeId"] == 6, step  # PACE_ZONE
+    assert step["targetType"]["workoutTargetTypeKey"] == "pace.zone", step
     # 4:00/km is 240s per 1000m -> 4.1667 m/s, with a +/-2% band around it.
-    assert 4.0 < target["targetValueOne"] < target["targetValueTwo"] < 4.3, target
+    assert 4.0 < step["targetValueOne"] < step["targetValueTwo"] < 4.3, step
 
 
 def test_swim_pace_is_read_as_per_100m():
@@ -124,10 +124,10 @@ def test_swim_pace_is_read_as_per_100m():
         {"type": "interval", "distance_meters": 100,
          "target_type": "pace", "target_value": "2:00"},
     ])
-    target = _steps(workout)[0]["targetType"]
+    step = _steps(workout)[0]
     # 2:00 per 100m is 120s per 100m -> ~0.83 m/s, not the 8.3 m/s a per-km
     # reading would give.
-    assert 0.8 < target["targetValueOne"] < 0.9, target
+    assert 0.8 < step["targetValueOne"] < 0.9, step
 
 
 def test_estimated_duration_multiplies_through_repeats():
@@ -144,10 +144,11 @@ def test_zone_and_range_targets_both_work():
          "target_type": "power_zone", "target_value": 1},
     ])
     ranged, zoned = _steps(workout)
-    assert ranged["targetType"]["targetValueOne"] == 220.0
-    assert ranged["targetType"]["targetValueTwo"] == 235.0
-    assert zoned["targetType"]["targetValueOne"] == 1
-    assert "targetValueTwo" not in zoned["targetType"], zoned["targetType"]
+    assert ranged["targetValueOne"] == 220.0, ranged
+    assert ranged["targetValueTwo"] == 235.0, ranged
+    # A bare zone index goes to zoneNumber, not a range.
+    assert zoned["zoneNumber"] == 1, zoned
+    assert "targetValueTwo" not in zoned, zoned
 
 
 def test_strength_steps_are_rep_based():
@@ -249,6 +250,29 @@ def test_create_workout_tool_uploads_and_reports_errors():
     assert fake.uploaded["workoutName"] == "4x8min"
     assert isinstance(bad, dict) and "error" in bad, bad
     assert "duration_seconds" in bad["error"], bad
+
+
+def test_target_values_sit_beside_target_type_not_inside_it():
+    """Garmin drops them silently if nested — right target type, no intensity.
+
+    Caught only by round-tripping a real workout through Garmin: the created
+    workout came back with heart.rate.zone set and zoneNumber null, i.e. "8
+    minutes" instead of "8 minutes in zone 4". Every offline assertion had
+    encoded the wrong shape.
+    """
+    workout = build_workout("running", "zones", [
+        {"type": "interval", "duration_seconds": 480,
+         "target_type": "heart_rate_zone", "target_value": 4},
+        {"type": "interval", "duration_seconds": 480,
+         "target_type": "pace", "target_value": "4:00"},
+    ])
+    for step in _steps(workout):
+        target = step["targetType"]
+        for field in ("targetValueOne", "targetValueTwo", "zoneNumber"):
+            assert field not in target, f"{field} must not be nested in targetType: {target}"
+        assert any(
+            f in step for f in ("targetValueOne", "zoneNumber")
+        ), f"step carries a target type but no value: {step}"
 
 
 def _run_all():
