@@ -30,6 +30,7 @@ from garmlink import deps  # noqa: E402
 from garmlink.auth_provider import (  # noqa: E402
     AllowlistedGitHubTokenVerifier,
     build_auth_provider,
+    build_oauth_store,
     resolve_readyz_token,
 )
 
@@ -262,6 +263,35 @@ def test_complete_config_builds_a_provider_with_the_allowlist():
         # dies instead), but leaving it set here would leak a live FirestoreStore
         # into every test that runs after this one in the same process.
         deps.set_oauth_store(None)
+
+
+def test_oauth_store_accepts_a_url_shaped_client_id():
+    """Claude identifies itself with a CIMD URL, not a DCR-issued UUID.
+
+    Our metadata advertises `client_id_metadata_document_supported`, so clients
+    may present a client_id like
+    `https://claude.ai/oauth/claude-code-client-metadata`. OAuthProxy keys its
+    client records by that string, and a Firestore document ID cannot contain
+    `/` — so an unsanitized store raises InvalidArgument on the first lookup and
+    the browser flow dies with a 500. That is exactly what happened in
+    production on the first connection attempt after the cutover; the DCR path
+    hid it, because a UUID has no slashes.
+    """
+    with _no_gcp_credentials():
+        store = build_oauth_store()
+
+    cimd = "https://claude.ai/oauth/claude-code-client-metadata"
+    sanitized = store._sanitize_key(cimd)  # noqa: SLF001 — the path the store itself takes
+    assert "/" not in sanitized, f"Firestore would reject the document ID {sanitized!r}"
+
+    # A DCR-issued UUID must pass through untouched: changing its key would
+    # orphan every client registration already written under the old ID.
+    uuid_id = "bc3c2163-b42f-4f50-8e85-f724f0f008d0"
+    assert store._sanitize_key(uuid_id) == uuid_id  # noqa: SLF001
+
+    # The collection name is a document path segment too, and takes the same
+    # treatment — a caller passing "a/b" would otherwise fail the same way.
+    assert "/" not in store._sanitize_collection("oauth/nested")  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------

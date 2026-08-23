@@ -92,12 +92,27 @@ def build_oauth_store() -> AsyncKeyValue:
 
     Credentials come from Application Default Credentials, which on Cloud Run
     is the runtime service account: no key material anywhere.
+
+    The sanitization strategies are not optional. OAuthProxy keys client records
+    by client_id, and we advertise `client_id_metadata_document_supported`, so
+    Claude presents a URL — `https://claude.ai/oauth/claude-code-client-metadata`
+    — rather than a DCR-issued UUID. A Firestore document ID cannot contain `/`,
+    so the store's default passthrough strategy turns the first lookup into
+    `InvalidArgument: ... lacks a collection id` and the browser flow dies with a
+    500. The DCR path hides this, because a UUID has no slashes. The strategies
+    leave slash-free IDs untouched, so registrations already written keep theirs.
     """
     from key_value.aio.stores.firestore import FirestoreStore
+    from key_value.aio.stores.firestore.store import (
+        FirestoreV1CollectionSanitizationStrategy,
+        FirestoreV1KeySanitizationStrategy,
+    )
 
     return FirestoreStore(
         project=os.getenv("GCP_PROJECT") or None,
         default_collection="oauth",
+        key_sanitization_strategy=FirestoreV1KeySanitizationStrategy(),
+        collection_sanitization_strategy=FirestoreV1CollectionSanitizationStrategy(),
     )
 
 
