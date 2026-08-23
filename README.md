@@ -39,16 +39,17 @@ Prerequisites: [gcloud](https://cloud.google.com/sdk/docs/install) and
    Cloud Run's free tier requires billing to be enabled on the project. You are
    not charged inside the free limits, but a card must be on file.
 
-2. Run the one-time setup — enables APIs, stores your three secrets in Secret
-   Manager, creates a deploy service account, and wires up keyless GitHub auth
-   via Workload Identity Federation:
+2. Run the one-time setup — enables APIs, stores your Garmin secrets in Secret
+   Manager, creates a deploy service account, and wires up keyless GitHub
+   Actions auth via Workload Identity Federation:
    ```bash
    ./scripts/setup-cloudrun.sh
    ```
-   It prompts for `GARMIN_EMAIL`, `GARMIN_TOKENS_JSON`, and `MCP_AUTH_TOKEN`
-   (generate one with `openssl rand -hex 32` — it must be at least 32
-   characters, and the server refuses to start without it). Save that token for
-   the Claude Desktop config below.
+   It prompts for `GARMIN_EMAIL` and `GARMIN_TOKENS_JSON`. The OAuth variables
+   in the table below — `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`,
+   `GITHUB_ALLOWED_USERS`, `PUBLIC_BASE_URL`, `READYZ_TOKEN` — aren't managed
+   by this script yet, so set them by hand before deploying, with
+   `gcloud run services update garmlink --set-env-vars/--set-secrets`.
 
    Edit the variables at the top of the script first if you want a different
    project id, region, or service name.
@@ -70,7 +71,7 @@ Prerequisites: [gcloud](https://cloud.google.com/sdk/docs/install) and
    session dies. That means expired tokens show up as failing tool calls rather
    than a failed deploy, so check readiness explicitly:
    ```bash
-   curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" "$URL/readyz"
+   curl -H "Authorization: Bearer $READYZ_TOKEN" "$URL/readyz"
    ```
    Reports `never` until the first tool call, then `authenticated`. A `503` with
    `"garmin": "error"` means the tokens are bad — re-run `garmlink-auth` and
@@ -84,24 +85,31 @@ credentials, so there is no long-lived service-account key in your repo secrets.
 The setup script sets the three repo variables the workflow reads
 (`GCP_PROJECT_ID`, `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`).
 
-## Claude Desktop Config
+## Connecting a Client
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Auth is GitHub OAuth now — there is no bearer token to paste into a client.
+
+**claude.ai (web and mobile):** Settings → Connectors → Add custom connector,
+then paste `https://<your-cloud-run-url>/mcp`. claude.ai drives the GitHub
+OAuth flow itself; sign in with a GitHub account listed in
+`GITHUB_ALLOWED_USERS`.
+
+**Claude Desktop / Claude Code:** add the server with no `headers` field —
+the client opens a browser for the same OAuth flow on first use. Add to
+`~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "garmlink": {
-      "url": "https://<your-cloud-run-url>/mcp",
-      "headers": { "Authorization": "Bearer <MCP_AUTH_TOKEN>" }
+      "url": "https://<your-cloud-run-url>/mcp"
     }
   }
 }
 ```
 
 Replace `<your-cloud-run-url>` with the URL printed at the end of the deploy
-workflow (or from step 4 above), and `<MCP_AUTH_TOKEN>` with the token you set
-during setup.
+workflow (or from step 4 above).
 
 ## Coaching Workflows
 
@@ -124,9 +132,13 @@ menu, and Claude Code exposes them as `/mcp__garmlink__morning_check` and so on.
 |---|---|
 | `GARMIN_EMAIL` | Your Garmin Connect email |
 | `GARMIN_TOKENS_JSON` | Base64-encoded token file (from `garmlink-auth`) |
-| `MCP_AUTH_TOKEN` | **Required.** Bearer token protecting the MCP endpoint; must be at least 32 characters. The server refuses to start without it. |
 | `GARMIN_PASSWORD` | Optional. Only used to re-authenticate if the stored tokens expire. |
-| `ALLOW_UNAUTHENTICATED` | Set to `1` to run with no authentication. Localhost development only — never on a public address. |
+| `GITHUB_CLIENT_ID` | **Required** (unless `ALLOW_UNAUTHENTICATED=1`). Client ID of the GitHub OAuth App backing the claude.ai connector. |
+| `GITHUB_CLIENT_SECRET` | **Required.** That app's client secret. |
+| `GITHUB_ALLOWED_USERS` | **Required.** Comma-separated GitHub logins allowed to use the server — the only access control once OAuth is on, so it fails closed: a blank value or a list naming nobody (e.g. `,,`) both abort startup. |
+| `PUBLIC_BASE_URL` | **Required.** The service's externally reachable URL, e.g. `https://garmlink-moz6szqd6q-uc.a.run.app`. OAuth callback URLs (`/auth/callback`) are derived from it. |
+| `READYZ_TOKEN` | **Required.** Bearer token guarding `/readyz`, checked independently of OAuth so it still answers when the OAuth layer itself is broken. |
+| `ALLOW_UNAUTHENTICATED` | Set to `1` to run with no authentication, skipping the five variables above. Localhost development only — never on a public address. |
 | `PORT` | Server port (default: 8000; Cloud Run injects 8080) |
 | `LOG_LEVEL` | `DEBUG`, `INFO` (default), `WARNING`, or `ERROR` |
 | `LOG_FORMAT` | `json` or `text`. Defaults to `json` on Cloud Run (detected via `K_SERVICE`), `text` elsewhere. |
@@ -165,7 +177,7 @@ JSON, and the platform lifts `severity` into the log viewer, so filtering by
 error works:
 
 ```
-{"severity":"INFO","message":"startup","tools":45,"prompts":4,"token_source":"secret","auth":"bearer"}
+{"severity":"INFO","message":"startup","tools":45,"prompts":4,"token_source":"secret","auth":"github_oauth"}
 {"severity":"INFO","message":"tool.call","name":"get_daily_summary","args":{"date":"2026-08-20"},"outcome":"ok","dur_ms":214.0,"cache":"0h/1m"}
 {"severity":"WARNING","message":"auth.reject","path":"/mcp","reason":"bad_token"}
 {"severity":"WARNING","message":"garmin.retry","method":"get_stats","attempt":1,"outcome":"rate_limited"}
