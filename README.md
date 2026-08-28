@@ -210,8 +210,8 @@ error works:
 
 ```
 {"severity":"INFO","message":"startup","tools":48,"prompts":8,"token_source":"secret","auth":"github_oauth","storage":"firestore","garmin_tokens":"firestore"}
-{"severity":"INFO","message":"garmin.token_restore","outcome":"ok","source":"store"}
-{"severity":"INFO","message":"garmin.token_persist","outcome":"ok"}
+{"severity":"INFO","message":"garmin.tokens.load","outcome":"ok","source":"store"}
+{"severity":"INFO","message":"garmin.tokens.save","outcome":"ok"}
 {"severity":"INFO","message":"tool.call","name":"get_daily_summary","args":{"date":"2026-08-20"},"outcome":"ok","dur_ms":214.0,"cache":"0h/1m"}
 {"severity":"WARNING","message":"auth.reject","path":"/mcp","reason":"bad_token"}
 {"severity":"WARNING","message":"garmin.retry","method":"get_stats","attempt":1,"outcome":"rate_limited"}

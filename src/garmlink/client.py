@@ -105,14 +105,14 @@ class GarminClient:
             blob = await self._token_store.load()
         except Exception as exc:
             # A read failure must not block the login — the seed is still there.
-            logger.warning("garmin.token_restore", extra={"fields": {
+            logger.warning("garmin.tokens.load", extra={"fields": {
                 "outcome": "error", "error": safe_error(exc),
             }})
             return
         if blob:
             self._tokens = blob
             self._persisted = blob
-        logger.info("garmin.token_restore", extra={"fields": {
+        logger.info("garmin.tokens.load", extra={"fields": {
             "outcome": "ok", "source": "store" if blob else "seed",
         }})
 
@@ -137,12 +137,12 @@ class GarminClient:
             await self._token_store.save(blob)
         except Exception as exc:
             # Losing a write costs us the next cold start, not this call.
-            logger.warning("garmin.token_persist", extra={"fields": {
+            logger.warning("garmin.tokens.save", extra={"fields": {
                 "outcome": "error", "error": safe_error(exc),
             }})
             return
         self._persisted = blob
-        logger.info("garmin.token_persist", extra={"fields": {"outcome": "ok"}})
+        logger.info("garmin.tokens.save", extra={"fields": {"outcome": "ok"}})
 
     async def _ensure_authenticated(self) -> None:
         """Authenticate on first use, exactly once across concurrent callers."""
