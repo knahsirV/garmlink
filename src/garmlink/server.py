@@ -18,6 +18,7 @@ from .auth_provider import build_auth_provider, resolve_readyz_token
 from .client import GarminClient
 from .deps import get_garmin_or_none, get_oauth_store, set_client, set_oauth_store
 from .logs import ToolCallLoggingMiddleware, logger, setup_logging
+from .tokens import GarminTokenStore
 from .tools.daily import mcp as daily_mcp
 from .tools.activities import mcp as activities_mcp
 from .tools.training import mcp as training_mcp
@@ -61,10 +62,21 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
         # Local dev: read tokens from the default garminconnect directory.
         tokenstore = str(Path.home() / ".garminconnect")
 
+    # Garmin rotates the refresh token on every refresh, and garminconnect
+    # writes the new blob back to `tokenstore` — which above is /tmp, wiped on
+    # every cold start of a scale-to-zero service. Persisting rotations to
+    # Firestore is what stops the seed in GARMIN_TOKENS_JSON from going stale
+    # the first time a token rotates. Same store as the OAuth state, separate
+    # collection. None under ALLOW_UNAUTHENTICATED, where `tokenstore` is a
+    # real directory that already survives restarts.
+    oauth_store = get_oauth_store()
+    token_store = GarminTokenStore(oauth_store) if oauth_store is not None else None
+
     client = GarminClient(
         email=email,
         password=password,
         tokenstore_path=tokenstore,
+        token_store=token_store,
     )
     # Deliberately NOT authenticating here. The service scales to zero, so a
     # Garmin round-trip in the startup path is paid on every cold start and a
@@ -85,6 +97,9 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
         # the ephemeral file store looks healthy and then forces a reconnect
         # after every cold start.
         "storage": "file" if get_oauth_store() is None else "firestore",
+        # A deploy where this says "ephemeral" will work until the first
+        # token rotation and then fail every cold start.
+        "garmin_tokens": "ephemeral" if token_store is None else "firestore",
     }})
 
     try:

@@ -77,6 +77,15 @@ Prerequisites: [gcloud](https://cloud.google.com/sdk/docs/install) and
    `"garmin": "error"` means the tokens are bad — re-run `garmlink-auth` and
    update the `GARMIN_TOKENS_JSON` secret.
 
+   Garmin rotates the DI refresh token on every refresh, which invalidates the
+   value that was presented. Those rotations are persisted to Firestore
+   (collection `garmin-tokens`), because `/tmp` is wiped on every cold start of
+   a scale-to-zero service — without that, the seed goes stale the first time a
+   token rotates and every subsequent cold start fails with
+   `Failed to retrieve social profile`. The `startup` log line reports
+   `"garmin_tokens":"firestore"` when this is wired up; `"ephemeral"` means it
+   is not, and the deploy will work until the first rotation and then break.
+
 ## Auto-Deploy via GitHub Actions
 
 Every push to `main` deploys via `.github/workflows/deploy.yml`. Authentication
@@ -151,7 +160,7 @@ menu, and Claude Code exposes them as `/mcp__garmlink__morning_check` and so on.
 | Variable | Description |
 |---|---|
 | `GARMIN_EMAIL` | Your Garmin Connect email |
-| `GARMIN_TOKENS_JSON` | Base64-encoded token file (from `garmlink-auth`) |
+| `GARMIN_TOKENS_JSON` | Base64-encoded token file (from `garmlink-auth`). A **seed**, not the live credential: Garmin rotates the refresh token, and rotations are persisted to Firestore, which then takes precedence. Re-seed only to bootstrap a new deployment or recover a stored blob that has gone bad. |
 | `GARMIN_PASSWORD` | Optional. Only used to re-authenticate if the stored tokens expire. |
 | `GITHUB_CLIENT_ID` | **Required** (unless `ALLOW_UNAUTHENTICATED=1`). Client ID of the GitHub OAuth App backing the claude.ai connector. |
 | `GITHUB_CLIENT_SECRET` | **Required.** That app's client secret. |
@@ -175,12 +184,15 @@ python3.12 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-Run the suite (the same six files CI runs):
+Run the suite (the same files CI runs):
 
 ```bash
 .venv/bin/python tests/test_garmin_contract.py
 .venv/bin/python tests/test_critical_fixes.py
 .venv/bin/python tests/test_auth_lifecycle.py
+.venv/bin/python tests/test_token_persistence.py
+.venv/bin/python tests/test_auth_provider.py
+GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_workout_builder.py
 GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_tool_dispatch.py
 GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_prompts.py
 GARMIN_EMAIL=x@y.z ALLOW_UNAUTHENTICATED=1 .venv/bin/python tests/test_logging.py
@@ -197,7 +209,9 @@ JSON, and the platform lifts `severity` into the log viewer, so filtering by
 error works:
 
 ```
-{"severity":"INFO","message":"startup","tools":48,"prompts":8,"token_source":"secret","auth":"github_oauth"}
+{"severity":"INFO","message":"startup","tools":48,"prompts":8,"token_source":"secret","auth":"github_oauth","storage":"firestore","garmin_tokens":"firestore"}
+{"severity":"INFO","message":"garmin.token_restore","outcome":"ok","source":"store"}
+{"severity":"INFO","message":"garmin.token_persist","outcome":"ok"}
 {"severity":"INFO","message":"tool.call","name":"get_daily_summary","args":{"date":"2026-08-20"},"outcome":"ok","dur_ms":214.0,"cache":"0h/1m"}
 {"severity":"WARNING","message":"auth.reject","path":"/mcp","reason":"bad_token"}
 {"severity":"WARNING","message":"garmin.retry","method":"get_stats","attempt":1,"outcome":"rate_limited"}
