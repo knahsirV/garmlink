@@ -606,6 +606,39 @@ def test_startup_is_logged_with_the_served_surface():
     assert starts[0].fields["storage"] == "file", starts[0].fields
 
 
+def test_our_own_log_message_names_survive_the_redactor():
+    """A log message name must not be long enough to look like a credential.
+
+    `_TOKENISH` matches any run of 20+ characters from [A-Za-z0-9_-.], and the
+    RedactingFilter applies it to `record.msg` — so a message name that reaches
+    20 characters is replaced wholesale by "[redacted]" and becomes impossible
+    to filter on in Cloud Logging. `garmin.token_restore` was exactly 20 and
+    shipped that way; the line still carried its fields but had no name.
+
+    Scoped to the structured events — the ones carrying `extra={"fields": ...}`,
+    which are what queries actually select on. Free-prose log lines are exempt:
+    they are read, not filtered, and a redacted run inside one costs nothing.
+    """
+    import re
+
+    from garmlink.logs import redact
+
+    src_dir = Path(__file__).resolve().parent.parent / "src" / "garmlink"
+    call = re.compile(
+        r"logger\.(?:debug|info|warning|error|critical)\(\s*\"([^\"]+)\"\s*,\s*extra="
+    )
+
+    seen = 0
+    for path in sorted(src_dir.rglob("*.py")):
+        for name in call.findall(path.read_text()):
+            seen += 1
+            assert redact(name) == name, (
+                f"{path.name}: log message {name!r} ({len(name)} chars) is "
+                f"scrubbed to {redact(name)!r} by the redactor — shorten it"
+            )
+    assert seen >= 8, f"only found {seen} log call sites; the scan regex is wrong"
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
