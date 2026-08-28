@@ -17,6 +17,7 @@ from garminconnect import (
 
 from .cache import ACTIVITY_TTL, HEALTH_TTL, STATIC_TTL, TTLCache
 from .logs import logger, record_cache, safe_error
+from .tokens import GarminTokenStore
 
 __all__ = ["GarminClient"]
 
@@ -24,11 +25,30 @@ _MAX_RETRIES = 3
 _BASE_DELAY = 1.0
 _JITTER = 0.2
 
+# How long a failed login suppresses further login attempts.
+#
+# Without this, a dead Garmin session cost one full ~3 s login *per call*:
+# `call()` invokes `_ensure_authenticated()` every time and a failure leaves
+# `_api` as None, so nothing was ever cached. `_auth_lock` then serialises those
+# attempts, so a 90-day range tool spent ~9 minutes failing one day at a time
+# and returned an empty result — which reads as "the connector is randomly
+# broken" rather than "the tokens are dead".
+#
+# Long enough to collapse a whole range tool into one attempt, short enough that
+# a session that recovers on its own is picked up on the next tool call.
+_AUTH_FAILURE_COOLDOWN = 60.0
+
 
 class GarminClient:
     """Async-friendly Garmin Connect client with caching and retry logic."""
 
-    def __init__(self, email: str, password: str, tokenstore_path: str) -> None:
+    def __init__(
+        self,
+        email: str,
+        password: str,
+        tokenstore_path: str,
+        token_store: GarminTokenStore | None = None,
+    ) -> None:
         self._email = email
         self._password = password
         self._tokenstore_path = tokenstore_path
@@ -40,12 +60,26 @@ class GarminClient:
         self._auth_lock = asyncio.Lock()
         self._authenticated_at: float | None = None
         self._last_auth_error: str | None = None
+        # Durable home for the rotating token blob. None on local dev, where
+        # the tokenstore path is a real directory that survives restarts.
+        self._token_store = token_store
+        # Best known token blob, and the copy the store already holds. Equal
+        # except between a rotation and the write that persists it.
+        self._tokens: str | None = None
+        self._persisted: str | None = None
+        self._restored = False
+        # Monotonic timestamp of the last failed login, for the cooldown.
+        self._auth_failed_at: float | None = None
 
-    def authenticate(self) -> None:
+    def authenticate(self, tokens: str | None = None) -> None:
         """Blocking Garmin login. Driven by _ensure_authenticated(), not called
         directly from async code — it performs network I/O.
 
-        Tries loading from tokenstore first; falls back to email+password login.
+        `tokens` is an inline token blob restored from durable storage;
+        `Garmin.login()` accepts it in place of a path (it dispatches on a
+        leading `{`). When absent — local dev, or a deployment that has never
+        persisted a rotation — the tokenstore path is used, and garminconnect
+        keeps auto-dumping rotations to it as before.
         """
         api = Garmin(
             email=self._email,
@@ -54,8 +88,61 @@ class GarminClient:
             prompt_mfa=None,
             return_on_mfa=False,
         )
-        api.login(self._tokenstore_path)
+        api.login(tokens if tokens else self._tokenstore_path)
         self._api = api
+
+    async def _restore_tokens(self) -> None:
+        """Load the persisted blob once, before the first login attempt.
+
+        Deliberately lazy rather than done in the server lifespan: startup stays
+        free of network I/O, which is what keeps a cold start cheap and stops a
+        Firestore blip from failing a deploy.
+        """
+        if self._token_store is None or self._restored:
+            return
+        self._restored = True
+        try:
+            blob = await self._token_store.load()
+        except Exception as exc:
+            # A read failure must not block the login — the seed is still there.
+            logger.warning("garmin.token_restore", extra={"fields": {
+                "outcome": "error", "error": safe_error(exc),
+            }})
+            return
+        if blob:
+            self._tokens = blob
+            self._persisted = blob
+        logger.info("garmin.token_restore", extra={"fields": {
+            "outcome": "ok", "source": "store" if blob else "seed",
+        }})
+
+    async def _persist_tokens(self) -> None:
+        """Write the current blob to durable storage if Garmin rotated it.
+
+        Called after every login and every successful API call, because
+        garminconnect refreshes — and therefore rotates — mid-call, not only at
+        login. The comparison keeps this to one write per rotation rather than
+        one per call.
+        """
+        if self._token_store is None or self._api is None:
+            return
+        try:
+            blob = self._api.client.dumps()
+        except Exception:
+            return  # nothing usable to persist
+        if not blob or blob == self._persisted:
+            return
+        self._tokens = blob
+        try:
+            await self._token_store.save(blob)
+        except Exception as exc:
+            # Losing a write costs us the next cold start, not this call.
+            logger.warning("garmin.token_persist", extra={"fields": {
+                "outcome": "error", "error": safe_error(exc),
+            }})
+            return
+        self._persisted = blob
+        logger.info("garmin.token_persist", extra={"fields": {"outcome": "ok"}})
 
     async def _ensure_authenticated(self) -> None:
         """Authenticate on first use, exactly once across concurrent callers."""
@@ -64,13 +151,35 @@ class GarminClient:
         async with self._auth_lock:
             if self._api is not None:
                 return  # another task authenticated while we waited
+
+            # Fail fast while a recent failure is still in cooldown. Without
+            # this, every call in a range tool pays its own failing login.
+            if self._auth_failed_at is not None:
+                waited = time.monotonic() - self._auth_failed_at
+                if waited < _AUTH_FAILURE_COOLDOWN:
+                    raise GarminConnectAuthenticationError(
+                        f"Garmin authentication failed "
+                        f"{waited:.0f}s ago; retrying in "
+                        f"{_AUTH_FAILURE_COOLDOWN - waited:.0f}s "
+                        f"({self._last_auth_error})"
+                    )
+
+            await self._restore_tokens()
+
             loop = asyncio.get_running_loop()
             started = time.perf_counter()
             try:
-                await loop.run_in_executor(self._executor, self.authenticate)
+                await loop.run_in_executor(
+                    self._executor, partial(self.authenticate, self._tokens)
+                )
             except Exception as exc:
                 self._authenticated_at = None
                 self._last_auth_error = safe_error(exc)
+                self._auth_failed_at = time.monotonic()
+                # A stored blob that no longer works must not wedge the service
+                # forever: drop it so the next attempt past the cooldown falls
+                # back to the GARMIN_TOKENS_JSON seed, which a redeploy can fix.
+                self._tokens = None
                 logger.error("garmin.login", extra={"fields": {
                     "outcome": "error",
                     "dur_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -79,10 +188,13 @@ class GarminClient:
                 raise
             self._authenticated_at = time.time()
             self._last_auth_error = None
+            self._auth_failed_at = None
             logger.info("garmin.login", extra={"fields": {
                 "outcome": "ok",
                 "dur_ms": round((time.perf_counter() - started) * 1000, 1),
             }})
+            # The login itself may have refreshed a token that was expiring.
+            await self._persist_tokens()
 
     def auth_status(self) -> dict:
         """Garmin session state, for the /readyz endpoint."""
@@ -206,6 +318,11 @@ class GarminClient:
                     "outcome": "rate_limited",
                 }})
                 continue
+
+            # garminconnect refreshes the DI token inside the request path when
+            # it is close to expiry, and a refresh rotates the refresh token.
+            # So the blob can change on an ordinary read, not just at login.
+            await self._persist_tokens()
 
             if cache_key is not None:
                 self._cache.set(cache_key, result, ttl)

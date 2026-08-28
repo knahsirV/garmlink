@@ -41,6 +41,7 @@ jobs:
         run: |
           python tests/test_critical_fixes.py
           python tests/test_auth_lifecycle.py
+          python tests/test_token_persistence.py
 
       # The allowlist is the whole of the access control after the OAuth
       # cutover: GitHubTokenVerifier accepts any token minted for our app, so
