@@ -41,26 +41,6 @@ mcp = FastMCP("coaching")
 # sport not yet started" — true when written, false within months. The durable
 # form of that instinct is below: report each sport against what the plan
 # prescribes for it, and name the gap when a prescribed sport is missing.
-# Garmin's API is metric throughout: distances in metres, speeds in metres per
-# second, pace targets denominated per kilometre. The athlete trains, races and
-# writes the plan in miles. Converting is not a formatting preference — an
-# unconverted pace is a wrong number that reads as a plausible one.
-_UNITS = """
-## Units
-
-Report distances in **miles** and pace in **min/mile**. Garmin returns metres
-and metres per second, so convert before reporting — never pass a raw metric
-value through into a report:
-
-- metres to miles: divide by 1609.34
-- m/s to min/mile: `1609.34 / speed` seconds, then format as mm:ss
-
-Swimming is the exception: report swim distances in **metres or yards** as the
-pool was measured, and swim pace per **100m**, which is how the sport is
-actually trained. Cycling keeps watts for power and miles for distance.
-"""
-
-
 _PLAN = """
 ## Read the plan first
 
@@ -223,7 +203,7 @@ seven days ending {end_date}.
 **Key Insight**: [1-2 sentence observation — e.g. "Heavy bike week, run volume
 low, good recovery trend"]
 **Next Week Suggestion**: [1-2 sentences based on load status]
-{_SPORT_KEYS}{_PLAN}{_UNITS}"""
+{_SPORT_KEYS}{_PLAN}"""
 
 
 @mcp.prompt(
@@ -264,7 +244,7 @@ def race_readiness(event: str = "", event_date: str = "") -> str:
 
 **Gaps to Address**: [any sport or metric that looks underprepared, measured
 against what the plan says this race needs]
-{_PLAN}{_UNITS}"""
+{_PLAN}"""
 
 
 # ---------------------------------------------------------------------------
@@ -370,8 +350,7 @@ from the shape of the session and say you are inferring it.
 **What to fix next time**: [one or two concrete, actionable things]
 
 Be direct about a session that was executed badly. A debrief that praises
-everything is useless. Ground every claim in a number from the splits.
-{_UNITS}"""
+everything is useless. Ground every claim in a number from the splits."""
 
 
 @mcp.prompt(
@@ -443,7 +422,7 @@ driving it. Do not analyse one sport in isolation.
 
 **What to do**: [concrete — hold, back off by roughly X%, or safe to build.
 Give a number, not "listen to your body".]
-{_SPORT_KEYS}{_PLAN}{_UNITS}"""
+{_SPORT_KEYS}{_PLAN}"""
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +578,7 @@ target because there is no baseline yet:
 Swim sets are written in distance, not time — 8 x 50m, not 8 x 45 seconds. Use
 `distance_meters` for them.
 """
-    return head + _ZWIFT + _UNITS + _STEP_SCHEMA + examples
+    return head + _ZWIFT + _STEP_SCHEMA + examples
 
 
 @mcp.prompt(
@@ -710,7 +689,7 @@ record.
 Then ask whether to apply it. Once applied, offer the plan-document note as a
 separate step.
 """
-    return head + _ZWIFT + _UNITS + _STEP_SCHEMA
+    return head + _ZWIFT + _STEP_SCHEMA
 
 
 @mcp.prompt(
@@ -836,5 +815,5 @@ calendar.
 block is meant to produce]
 **Watch for**: [the specific thing most likely to go wrong — usually run volume
 or a swim habit that does not stick]
-{_SPORT_KEYS}{_PLAN}{_UNITS}"""
-    return head + _ZWIFT + _UNITS + _STEP_SCHEMA
+{_SPORT_KEYS}{_PLAN}"""
+    return head + _ZWIFT + _STEP_SCHEMA

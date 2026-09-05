@@ -161,8 +161,13 @@ async def create_workout(
       - 'target_value':
         - heart_rate_zone: zone number 1-5, or [low_bpm, high_bpm]
         - power_zone:      zone number 1-7, or [low_watts, high_watts]
-        - pace:            'mm:ss' per km (per 100m for swimming), or [fast, slow].
-                           Override the unit with 'pace_per': 'km'|'mile'|'100m'|'100y'
+        - pace:            'mm:ss', or [fast, slow]. ALWAYS set 'pace_per'
+                           alongside it: 'km'|'mile'|'100m'|'100y'. It defaults
+                           to 'km' for every sport but swimming, so '8:30'
+                           meant as 8:30/mile is stored as 8:30/km — about
+                           13:41/mile, five minutes a mile too slow, and it
+                           looks plausible on the watch. This athlete trains
+                           in miles: use 'mile' for running and cycling.
         - cadence:         steps or rpm, or [low, high]
       - strength steps also take 'exercise' (e.g. 'BENCH_PRESS') and optional 'weight_kg'
 

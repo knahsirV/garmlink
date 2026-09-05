@@ -123,7 +123,30 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
 # FastMCP app
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("garmlink", lifespan=lifespan)
+# Server instructions reach every client, resident, without being invoked —
+# unlike prompts, which cost nothing until called but also apply to nothing
+# until called. Conventions that must hold for an ad-hoc "how far did I run
+# Tuesday?" belong here, not in a prompt and not in one client's CLAUDE.md,
+# which is invisible from Claude Desktop and the phone. Keep it short: this is
+# resident on every request.
+INSTRUCTIONS = """\
+Garmin data for one athlete, training for endurance events.
+
+**The training plan is the source of truth.** Goals, race dates, the current
+block, the weekly template and the training zones live in a plan document, not
+in this server and not in your memory. Call `get_training_plan` before answering
+anything training-related, and do not assume what the athlete is training for.
+
+**Units.** Report distances in miles and pace in min/mile. Garmin returns metres
+and metres per second, so convert: metres / 1609.34 for miles, and 1609.34 /
+speed seconds for min/mile. Swimming is the exception — report it in metres and
+per-100m, which is how the sport is trained. Power stays in watts.
+
+**Writes wait.** Every tool that changes a workout, the calendar or the plan
+document shows the change and waits for an explicit yes first.
+"""
+
+mcp = FastMCP("garmlink", instructions=INSTRUCTIONS, lifespan=lifespan)
 
 # Mount all tool sub-servers onto the main app.
 mcp.mount(daily_mcp)
