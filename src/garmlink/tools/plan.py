@@ -49,6 +49,31 @@ _TIMEOUT = httpx.Timeout(10.0)
 # quietly dropping the tail.
 _SHRINK_FLOOR = 0.7
 
+# The plan lives in a public repository. It once carried the athlete's birth
+# date, height and weight in every commit since the first, and removing them
+# took a history rewrite that still left orphaned commits reachable — a write
+# here is effectively permanent, which is why these block rather than warn the
+# way the renderer checks do.
+#
+# Re-adding is a live risk, not a hypothetical one: `get_user_profile` hands the
+# model Garmin's profile, birth date and weight included, and the Athlete
+# Snapshot now has a conspicuous gap where those lines used to be. Restoring
+# them reads as filling in missing detail (W/kg is a normal cycling metric, age
+# drives max-HR estimates) rather than as undoing a deliberate redaction.
+_PERSONAL_DATA_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bborn\b", "a birth date"),
+    (r"\b(?:date of birth|d\.?o\.?b\.?)\b", "a birth date"),
+    # A bare month-day-year, which is how a birth date is usually written out.
+    (r"\b(?:january|february|march|april|may|june|july|august|september|october"
+     r"|november|december)\s+\d{1,2},\s*(?:19|20)\d{2}\b", "a full date"),
+    (r"\b\d{1,3}\s*(?:lb|lbs|kg)\b", "a body weight"),
+    # Feet-and-inches, e.g. 5'7" — triple-quoted so both quote characters sit
+    # inside the literal without escaping.
+    (r'''\b\d\s*'\s*\d{1,2}\s*"''', "a height"),
+    (r"\b\d{1,3}\s*(?:cm)\b", "a height"),
+    (r"\b(?:aged?|years old|yrs old)\b", "an age"),
+)
+
 
 class PlanError(Exception):
     """Anything that should reach the user as a plain message, not a traceback."""
@@ -89,8 +114,39 @@ def _headers(token: str) -> dict[str, str]:
 # Validation
 # ---------------------------------------------------------------------------
 
+def _new_personal_data(new: str, current: str) -> list[str]:
+    """Personal-data patterns that `new` introduces and `current` does not have.
+
+    Comparison is per *pattern*, not per matched string. A plan that already
+    records a lifting load in pounds must stay able to record a different one —
+    matching on the exact string would block `185lb` because only `135lb` was
+    there before, which makes the guard turn the document read-only for its own
+    content.
+
+    The cost is honest and worth stating: once the document contains any match
+    for a pattern, that pattern stops guarding. Introducing the first one takes a
+    deliberate `allow_personal_data=true`, so the weakening is a choice rather
+    than an accident, and the plan currently matches none of these patterns.
+    """
+    found: list[str] = []
+    for pattern, describes in _PERSONAL_DATA_PATTERNS:
+        # Already present in some form: the document has accepted this kind of
+        # content, so new instances of it are not the model reintroducing PII.
+        if re.search(pattern, current, re.IGNORECASE):
+            continue
+        for added in sorted(
+            set(m.group(0) for m in re.finditer(pattern, new, re.IGNORECASE))
+        ):
+            found.append(f"{added!r} looks like {describes}")
+    return found
+
+
 def validate_plan_update(
-    new: str, current: str, *, allow_shrink: bool = False
+    new: str,
+    current: str,
+    *,
+    allow_shrink: bool = False,
+    allow_personal_data: bool = False,
 ) -> None:
     """Raise `PlanError` if `new` looks like a damaged replacement for `current`.
 
@@ -124,6 +180,18 @@ def validate_plan_update(
             "complete document. If the cut really is intended, pass "
             "allow_shrink=true."
         )
+
+    if not allow_personal_data:
+        added = _new_personal_data(new, current)
+        if added:
+            raise PlanError(
+                "Refusing to write: this adds what looks like personal data to a "
+                "public repository — " + "; ".join(added) + ". The plan documents "
+                "training, not identity: keep FTP, VO2max, threshold HR and the "
+                "zones, and leave out birth date, age, height and body weight. "
+                "Remove it and resend. If this is a false positive (a lifting "
+                "load, a race date), pass allow_personal_data=true."
+            )
 
 
 # The PWA renders the plan with a hand-rolled markdown subset (`render.js` in the
@@ -232,6 +300,7 @@ async def update_training_plan(
     base_sha: str,
     message: str,
     allow_shrink: bool = False,
+    allow_personal_data: bool = False,
 ) -> dict:
     """
     Write a new version of the training plan document, replacing it entirely.
@@ -247,6 +316,12 @@ async def update_training_plan(
         message:      Commit message describing the adjustment.
         allow_shrink: Permit a new version more than 30% shorter than the current
                       one. Off by default, because that is normally truncation.
+        allow_personal_data: Permit text that looks like a birth date, age, height
+                      or body weight. Off by default — this plan is in a PUBLIC
+                      repository, so never record those; keep FTP, VO2max,
+                      threshold HR and the zones, which the coaching needs and
+                      which identify far less. Only set this for a genuine false
+                      positive, such as a lifting load in pounds.
 
     Returns the commit URL and any render warnings for the plan's PWA.
     """
@@ -259,7 +334,12 @@ async def update_training_plan(
 
     try:
         current = await _fetch_plan()
-        validate_plan_update(markdown, current["markdown"], allow_shrink=allow_shrink)
+        validate_plan_update(
+            markdown,
+            current["markdown"],
+            allow_shrink=allow_shrink,
+            allow_personal_data=allow_personal_data,
+        )
     except PlanError as exc:
         return {"error": str(exc)}
     except httpx.HTTPError as exc:

@@ -150,6 +150,12 @@ and metres per second, so convert: metres / 1609.34 for miles, and 1609.34 /
 speed seconds for min/mile. Swimming is the exception — report it in metres and
 per-100m, which is how the sport is trained. Power stays in watts.
 
+**The plan is public.** It lives in a public repository, so never write the
+athlete's birth date, age, height or body weight into it. Keep FTP, VO2max,
+threshold HR and the training zones — the coaching needs those and they identify
+far less. `get_user_profile` returns birth date and weight from Garmin; use them
+to reason, never to edit the document.
+
 **Writes wait.** Every tool that changes a workout, the calendar or the plan
 document shows the change and waits for an explicit yes first.
 """

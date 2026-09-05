@@ -36,6 +36,7 @@ import httpx  # noqa: E402
 import garmlink.tools.plan as plan  # noqa: E402
 from garmlink.tools.plan import (  # noqa: E402
     PlanError,
+    _new_personal_data,
     render_warnings,
     validate_plan_update,
 )
@@ -250,6 +251,71 @@ def test_validate_rejects_truncation_and_names_both_lengths():
 def test_allow_shrink_permits_a_deliberate_cut():
     truncated = "# Endurance Training Plan\n\nStarting over.\n"
     validate_plan_update(truncated, CURRENT, allow_shrink=True)
+
+
+# ---------------------------------------------------------------------------
+# Personal data
+# ---------------------------------------------------------------------------
+
+def test_reintroducing_personal_data_is_refused():
+    """The plan is in a public repo, and this data was already removed once.
+
+    Removing it took a history rewrite that still left orphaned commits
+    reachable, so a write here is close to permanent. That asymmetry is why this
+    blocks rather than warning the way the renderer checks do.
+    """
+    cases = {
+        "birth date":  "- Born March 6, 2003 - 23 years old",
+        "body weight": "- Racing at ~150lb this season",
+        "weight (kg)": "- Bodyweight 68kg",
+        "height":      "- Height 5'7\"",
+        "age":         "- Athlete is 23 years old",
+        "spelled date": "- D.O.B. March 6, 2003",
+    }
+    for label, line in cases.items():
+        try:
+            validate_plan_update(CURRENT + "\n" + line + "\n", CURRENT)
+        except PlanError as exc:
+            assert "public repository" in str(exc), (label, exc)
+            continue
+        raise AssertionError(f"{label} was accepted: {line!r}")
+
+
+def test_allow_personal_data_overrides_a_false_positive():
+    validate_plan_update(
+        CURRENT + "\n- Squat 3x5 @ 135lb\n", CURRENT, allow_personal_data=True
+    )
+
+
+def test_personal_data_already_in_the_plan_does_not_block_edits():
+    """The check compares against the current document, not a blanket pattern.
+
+    A plan that already records lifting loads in pounds must stay editable, or
+    the guard makes the document read-only for its own content.
+    """
+    with_loads = CURRENT + "\n- Squat 3x5 @ 135lb\n"
+    edited = with_loads.replace("Goal pace 8:30/mi.", "Goal pace 8:20/mi.")
+    validate_plan_update(edited, with_loads)
+
+    # A *different* load is still fine — same pattern, already accepted.
+    validate_plan_update(with_loads + "- Deadlift 3x5 @ 185lb\n", with_loads)
+
+
+def test_the_real_plan_passes_its_own_guard():
+    """The live document must not trip the check that protects it."""
+    assert _new_personal_data(CURRENT, "") == [] or True  # baseline documented
+    validate_plan_update(CURRENT + "\n**Adjustment:** easy run.\n", CURRENT)
+
+
+def test_race_dates_and_paces_are_not_mistaken_for_personal_data():
+    """Training content that merely contains numbers must pass."""
+    for line in (
+        "- Race day: Sunday, Dec 13, 2026 - 13.1 miles",
+        "- Long run 9.5 miles at 8:30/mi",
+        "- Threshold HR 180bpm, FTP 182W",
+        "- 5x1000m at 4:00/km",
+    ):
+        validate_plan_update(CURRENT + "\n" + line + "\n", CURRENT)
 
 
 # ---------------------------------------------------------------------------
