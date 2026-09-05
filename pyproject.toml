@@ -15,6 +15,13 @@ dependencies = [
     # switching from dict to list between 0.3.2 and 0.3.11.
     "garminconnect==0.3.11",
     "fastmcp>=3.4,<4",
+    # tools/plan.py imports httpx directly to reach the GitHub Contents API.
+    # It has only ever arrived transitively through fastmcp; same reasoning as
+    # py-key-value-aio below — a library imported directly is declared directly,
+    # so a change in what fastmcp happens to drag in cannot silently remove it.
+    # A range rather than an exact pin: unlike the pins here, httpx has not
+    # broken this project, and fastmcp resolves against it too.
+    "httpx>=0.27,<1",
     "python-dotenv>=1.0",
     "uvicorn>=0.30",
     # OAuth state (DCR registrations, refresh-token mappings) must outlive a

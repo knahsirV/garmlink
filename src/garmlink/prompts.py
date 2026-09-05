@@ -15,7 +15,15 @@ whole-body number. Per-session prompts (`session_debrief`,
 `create_workout_guide`) take a sport, because the *tools* differ: a swim needs
 `get_swim_activity_detail`, a run needs `get_running_dynamics`.
 
-Anything that writes to Garmin shows the change and waits for an explicit yes.
+Anything that writes — to Garmin or to the plan document — shows the change and
+waits for an explicit yes.
+
+These prompts deliberately hold no athlete facts. Goals, race dates, the weekly
+template and the zones live in the plan document and are read at run time with
+`get_training_plan`. They used to be hardcoded here, and the copy went stale:
+this file asserted "no race booked" and "swimming not yet started" for months
+after a half marathon was booked and swim sessions began, which is exactly what
+a duplicated fact does. Method belongs here; facts belong in the plan.
 
 Keep tool references in backticks — tests/test_prompts.py checks that every
 backticked tool name is one the server actually exposes.
@@ -28,17 +36,34 @@ from fastmcp import FastMCP
 mcp = FastMCP("coaching")
 
 
-# Repeated verbatim into every prompt that reports across sports. The user is
-# training for triathlon but has not started swimming yet, so an empty swim
-# section is the single most informative thing these reports can say — as long
-# as it says it out loud instead of rendering a blank line.
-_SWIM_GAP = """
-## Reporting the swim gap
+# Repeated verbatim into every prompt that needs to know what the athlete is
+# actually training for. This replaced a block that hardcoded "swimming is the
+# sport not yet started" — true when written, false within months. The durable
+# form of that instinct is below: report each sport against what the plan
+# prescribes for it, and name the gap when a prescribed sport is missing.
+_PLAN = """
+## Read the plan first
 
-If there are no swim sessions in the window, do not render an empty section and
-do not silently drop it. Say so explicitly — "Swim: no sessions in this window"
-— and treat it as a finding, because triathlon is the goal and swimming is the
-sport not yet started. Mention it once, in its own line. Do not lecture.
+Call `get_training_plan` before analysing anything. It returns the athlete's
+training plan document — the source of truth for the current block, the goal race
+and its date, the weekly template, the training zones, and the log of past
+adjustments. Do not assume what they are training for or what a normal week looks
+like for them. The plan says.
+
+Then report against what the plan actually prescribes:
+
+- Judge the window against the plan's weekly template, not a generic idea of a
+  training week. A missed session is only missed relative to what was planned.
+- If a sport the plan schedules has **no** sessions in the window, do not render
+  an empty section and do not silently drop it. Say so explicitly — "Swim: no
+  sessions in this window" — and treat it as a finding. Mention it once, in its
+  own line. Do not lecture.
+- Use the zones in the plan. They are the athlete's own measured numbers, and
+  they are more current than anything inferred.
+
+If `get_training_plan` returns an error, say so in one line and continue on
+Garmin data alone. Do not substitute an assumption for what the plan would have
+said.
 """
 
 
@@ -178,7 +203,7 @@ seven days ending {end_date}.
 **Key Insight**: [1-2 sentence observation — e.g. "Heavy bike week, run volume
 low, good recovery trend"]
 **Next Week Suggestion**: [1-2 sentences based on load status]
-{_SPORT_KEYS}{_SWIM_GAP}"""
+{_SPORT_KEYS}{_PLAN}"""
 
 
 @mcp.prompt(
@@ -186,22 +211,22 @@ low, good recovery trend"]
 )
 def race_readiness(event: str = "", event_date: str = "") -> str:
     """Assess current fitness against a target race."""
-    target = event or "the target event"
+    target = event or "the goal race named in the training plan"
     when = f" on {event_date}" if event_date else ""
-    ask = (
-        ""
-        if event and event_date
-        else "\n1. Ask the user what race/event, what distance, and when it is.\n"
-    )
     return f"""Assess current fitness against {target}{when}.
-{ask}
+
 ## Steps
 
-1. Call `get_triathlon_fitness_snapshot` — cross-sport fitness overview.
-2. Call `get_race_predictions` — predicted running race times.
-3. Call `get_training_load_trend` with today's date — current load status.
-4. Call `get_cycling_ftp` — current cycling power.
-5. Call `get_endurance_score` with today's date — aerobic capacity.
+1. Call `get_training_plan` and read the goal race, its date and its distance off
+   the plan. Do not ask the user for them — the plan is where they live. Ask only
+   if the plan genuinely names no upcoming race. Anything passed as an argument to
+   this prompt overrides the plan; if the two disagree, use the argument and say
+   which one you used.
+2. Call `get_triathlon_fitness_snapshot` — cross-sport fitness overview.
+3. Call `get_race_predictions` — predicted running race times.
+4. Call `get_training_load_trend` with today's date — current load status.
+5. Call `get_cycling_ftp` — current cycling power.
+6. Call `get_endurance_score` with today's date — aerobic capacity.
 
 ## Output format
 
@@ -217,8 +242,9 @@ def race_readiness(event: str = "", event_date: str = "") -> str:
 - Current status: [productive/maintaining/peaking/recovery]
 - Recommendation: [whether to taper, maintain, or build before the race]
 
-**Gaps to Address**: [any sport or metric that looks underprepared]
-{_SWIM_GAP}"""
+**Gaps to Address**: [any sport or metric that looks underprepared, measured
+against what the plan says this race needs]
+{_PLAN}"""
 
 
 # ---------------------------------------------------------------------------
@@ -293,10 +319,12 @@ deliberately varying.
 other. Was rep 5 slower than rep 1, and by how much? Consistency across reps is
 the point of an interval session; a big fade means it started too hard.
 
-**Execution vs intent.** If a workout was scheduled for this day, call
-`get_scheduled_workouts` for that month and compare what was planned against
-what happened. If nothing was planned, infer the intent from the shape of the
-session and say you are inferring it.
+**Execution vs intent.** Call `get_training_plan` and `get_scheduled_workouts`
+for that month, and compare what was planned against what happened. The plan
+gives the session's *purpose* — which day of the weekly template this was, and
+what that day is for — where the calendar entry only gives its structure. Judge
+against the purpose. If neither names anything for this day, infer the intent
+from the shape of the session and say you are inferring it.
 
 **Sport-specific reads.**
 - Running: did cadence hold as pace dropped? Rising ground contact time late in
@@ -394,7 +422,7 @@ driving it. Do not analyse one sport in isolation.
 
 **What to do**: [concrete — hold, back off by roughly X%, or safe to build.
 Give a number, not "listen to your body".]
-{_SPORT_KEYS}{_SWIM_GAP}"""
+{_SPORT_KEYS}{_PLAN}"""
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +494,10 @@ to Garmin Connect.
 
 2. **Fetch the user's own numbers before designing anything.** A workout built
    on generic zones is a worse workout. Which calls depend on the sport:
+   - Always: `get_training_plan` — the plan carries the athlete's own zone tables
+     and says what this day of the week is for. Where the plan's zones and
+     Garmin's disagree, the plan wins: it records the corrections that have been
+     made deliberately. Say when you are overriding Garmin with it.
    - Always: `get_user_profile` — heart rate zones and max HR.
    - Running: `get_lactate_threshold` for threshold pace and HR, and
      `get_race_predictions` to sanity-check that interval paces are realistic.
@@ -552,21 +584,29 @@ actually is, and adjust the plan if the data says to.
 ## Steps
 
 1. Resolve {date} to YYYY-MM-DD.
-2. Call `get_scheduled_workouts` for that month and find what is planned for
+2. Call `get_training_plan`. Keep the returned `sha` — writing the adjustment
+   back at the end needs it. The plan says which day of the weekly template this
+   is and what that day is for, which is what makes the difference between
+   softening a session and gutting the week's purpose.
+3. Call `get_scheduled_workouts` for that month and find what is planned for
    that date. Keep both IDs from the result: the **workout ID** (the session
    itself) and the **scheduled workout ID** (the calendar entry). They are
    different, and the move path below needs the second one.
-3. If something is scheduled, call `get_workout_by_id` to see its actual
+4. If something is scheduled, call `get_workout_by_id` to see its actual
    structure — you cannot judge whether a session is too hard without knowing
    what is in it.
-4. Assess readiness: `suggest_recovery`, `get_training_readiness` and
+5. Assess readiness: `suggest_recovery`, `get_training_readiness` and
    `get_wellness_snapshot` for that date.
-5. Get load context: `get_training_load_trend` for that date. A single bad
+6. Get load context: `get_training_load_trend` for that date. A single bad
    night on top of a light block reads differently from the same night at the
    end of a heavy one.
 
-If nothing is scheduled, say so and suggest what would fit today given
-readiness and recent load — then stop, unless the user asks you to build it.
+If the calendar has nothing but the plan's template says this day has a session,
+that is itself the finding: the calendar has not been populated that far out. Say
+so, and offer to build it.
+
+If neither has anything, say so and suggest what would fit today given readiness
+and recent load — then stop, unless the user asks you to build it.
 
 ## The decision
 
@@ -598,6 +638,34 @@ key session — not on a single soft number.
 State the change, the reason, and the specific number behind it, then wait for
 an explicit yes. Never write to the calendar without confirmation.
 
+## Recording the adjustment in the plan
+
+A change that only lands on the Garmin calendar is invisible to every later
+review — the plan document still describes the week that did not happen. So once
+the Garmin-side change is applied, offer to record it in the plan.
+
+Write it in the same voice as the adjustment notes already in the document: what
+was changed, on what date, the specific readiness or load number that drove it,
+and what was deliberately left alone. Keep it to the plan's existing structure —
+match how previous adjustments are formatted rather than inventing a new section.
+
+Then:
+
+1. Show the exact text being added, and where it goes. Wait for a **separate**
+   explicit yes — this is a second write to a second system, and the earlier
+   confirmation covered the calendar, not the document.
+2. Call `update_training_plan` with the **complete** new document, the `sha` kept
+   from step 2, and a one-line commit message. It replaces the entire file, so
+   send the whole thing — a partial document silently deletes the rest.
+3. If it reports a stale `sha`, the plan changed underneath: call
+   `get_training_plan` again, re-apply the edit to the current text, and retry.
+   Do not force it.
+4. If it returns `render_warnings`, pass them on — those lines will show as raw
+   markdown in the plan's phone app.
+
+Skip this entirely for a **keep** decision. Nothing changed; there is nothing to
+record.
+
 ## Output format
 
 **Plan Check — [date]**
@@ -610,7 +678,8 @@ an explicit yes. Never write to the calendar without confirmation.
 **Why**: [one or two sentences, naming the number that drove it]
 **Proposed change**: [exactly what would change — the before and the after]
 
-Then ask whether to apply it.
+Then ask whether to apply it. Once applied, offer the plan-document note as a
+separate step.
 """
     return head + _ZWIFT + _STEP_SCHEMA
 
@@ -628,17 +697,21 @@ def build_training_block(
         else "Ask what weekly hours are realistic, and how many days per week they "
         "can train, before designing anything."
     )
-    if race_date:
-        goal = f"""There is a target event on {race_date}. Work backwards from it: build
-phase first, then sharpen, then taper into the event. Call `get_race_predictions`
-and `get_triathlon_fitness_snapshot` to judge how far current fitness sits from
-what that event needs."""
-    else:
-        goal = """There is no race on the calendar. Do not ask for one and do not stall
-waiting for a goal event — build an aerobic base block. The aim is consistency,
-durable aerobic fitness, and establishing swimming as a habit. That is the right
-objective for an athlete with no event booked, and it is what everything below
-assumes."""
+    override = (
+        f"\n\nThe user has given {race_date} as the target date. It overrides the "
+        "plan's date; if the two disagree, use this one and say so."
+        if race_date
+        else ""
+    )
+    goal = f"""Take the goal race and its date from the plan document — that is what step 1
+below reads it for. Work backwards from it: build phase first, then sharpen, then
+taper into the event. Call `get_race_predictions` and
+`get_triathlon_fitness_snapshot` to judge how far current fitness sits from what
+that event needs.
+
+If the plan names no upcoming race, build an aerobic base block instead — the aim
+is then consistency and durable aerobic fitness. Do not stall waiting for a goal
+event, and do not invent one.{override}"""
 
     head = f"""Design a {weeks}-week triathlon training block and put it on the Garmin
 calendar.
@@ -649,8 +722,11 @@ calendar.
 
 ## Steps
 
-1. **Measure the baseline before planning anything.** A block that ramps from an
-   assumed starting point is how people get hurt.
+1. **Read the plan, then measure the baseline.** Call `get_training_plan` first:
+   it gives the goal race, the current block, the weekly template this athlete
+   actually trains, and their zones. A block designed against a generic template
+   when a real one exists is a worse block. Then measure — a block that ramps
+   from an assumed starting point is how people get hurt.
    - `get_volume_by_sport` for the last 28 days — the actual current volume,
      per sport.
    - `get_training_load_trend` for today — current acute and chronic load.
@@ -684,8 +760,10 @@ calendar.
    confirmed current Zwift workout rather than creating a Garmin workout — see
    the Zwift section below. Only the outdoor rides go through `create_workout`.
 
-5. **Swimming.** The user does not swim yet and wants to start. Build this in
-   deliberately:
+5. **Swimming.** Read where the plan has the swim before prescribing one — the
+   right dose for someone starting out is not the right dose for someone already
+   swimming weekly, and the plan says which this is. If swimming is new or only
+   recently started, build it in deliberately:
    - Frequency over duration. Three short swims a week beats one long one —
      swimming is a technique sport and it is learned by repetition.
    - Start around 800-1200m per session, structured as short distance-based
@@ -695,8 +773,10 @@ calendar.
    - Prescribe by distance and effort, not pace. There is no pace baseline yet,
      and inventing one produces a target that is either meaningless or
      discouraging.
-   - Do not ramp swim volume for the first two weeks. Consistency is the whole
-     goal; volume can come once the habit and the stroke exist.
+   - Do not ramp swim volume for the first two weeks of a newly added swim.
+     Consistency is the whole goal; volume can come once the habit and the
+     stroke exist. Once the plan shows the swim as established, ramp it like any
+     other sport.
 
 6. **Present the whole block before writing anything.** Week by week, with
    total hours and the session list per week. Wait for an explicit yes.
@@ -727,5 +807,5 @@ calendar.
 block is meant to produce]
 **Watch for**: [the specific thing most likely to go wrong — usually run volume
 or a swim habit that does not stick]
-{_SPORT_KEYS}{_SWIM_GAP}"""
+{_SPORT_KEYS}{_PLAN}"""
     return head + _ZWIFT + _STEP_SCHEMA

@@ -76,6 +76,10 @@ jobs:
           ALLOW_UNAUTHENTICATED: '1'
         run: python tests/test_logging.py
 
+      # Offline: httpx is faked, so this needs neither a token nor network.
+      - name: Training plan read/write and structure independence
+        run: python tests/test_training_plan.py
+
   deploy:
     needs: test
     runs-on: ubuntu-latest
@@ -91,6 +95,12 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
+      # `--set-secrets` REPLACES the service's entire secret mapping, so every
+      # secret the server needs must be listed here. A secret attached by hand
+      # with `gcloud run services update --update-secrets` survives exactly
+      # until the next push to main and then vanishes — silently, because a
+      # missing TRAINING_PLAN_GITHUB_TOKEN degrades to a readonly plan rather
+      # than a failed boot.
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy "$SERVICE" \
@@ -103,7 +113,7 @@ jobs:
             --memory=512Mi \
             --cpu=1 \
             --timeout=3600 \
-            --set-secrets=GARMIN_EMAIL=GARMIN_EMAIL:latest,GARMIN_TOKENS_JSON=GARMIN_TOKENS_JSON:latest,GITHUB_CLIENT_ID=GITHUB_CLIENT_ID:latest,GITHUB_CLIENT_SECRET=GITHUB_CLIENT_SECRET:latest,READYZ_TOKEN=READYZ_TOKEN:latest \
+            --set-secrets=GARMIN_EMAIL=GARMIN_EMAIL:latest,GARMIN_TOKENS_JSON=GARMIN_TOKENS_JSON:latest,GITHUB_CLIENT_ID=GITHUB_CLIENT_ID:latest,GITHUB_CLIENT_SECRET=GITHUB_CLIENT_SECRET:latest,READYZ_TOKEN=READYZ_TOKEN:latest,TRAINING_PLAN_GITHUB_TOKEN=TRAINING_PLAN_GITHUB_TOKEN:latest \
             --set-env-vars=PUBLIC_BASE_URL=https://garmlink-moz6szqd6q-uc.a.run.app,GITHUB_ALLOWED_USERS=knahsirV \
             --quiet
 

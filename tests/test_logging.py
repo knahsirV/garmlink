@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -235,6 +236,52 @@ def test_tool_call_log_redacts_token_shaped_arguments():
         asyncio.run(go())
 
     assert secret not in str(logs.with_message("tool.call")[0].fields)
+
+
+def test_plan_markdown_argument_is_never_logged():
+    """The one argument that is itself health data.
+
+    Results are never logged, but *arguments* are — redacted and truncated to
+    200 characters. `redact()` only masks token-shaped runs, so a large free-text
+    argument passes through it intact, and the first 200 characters of the
+    training plan are the athlete snapshot: birth date, weight, FTP, threshold
+    HR. Truncation is not a privacy control when the sensitive part is the top of
+    the document.
+    """
+    server = FastMCP("parent")
+    child = FastMCP("child")
+
+    @child.tool()
+    async def update_training_plan(markdown: str, base_sha: str) -> dict:
+        return {"status": "written"}
+
+    server.mount(child)
+    server.add_middleware(ToolCallLoggingMiddleware())
+
+    snapshot = (
+        "# Endurance Training Plan\n\n## Athlete Snapshot\n\n"
+        "- Born March 6, 2003 - FTP 182W - LTHR 180bpm - ~150lb / 5'7\"\n"
+    )
+
+    async def go():
+        async with Client(server) as c:
+            await c.call_tool(
+                "update_training_plan",
+                {"markdown": snapshot, "base_sha": "abc123"},
+            )
+
+    with _CapturedLogs() as logs:
+        asyncio.run(go())
+
+    fields = logs.with_message("tool.call")[0].fields
+    logged = json.dumps(fields)
+    for leaked in ("March 6, 2003", "182W", "180bpm", "150lb"):
+        assert leaked not in logged, f"{leaked!r} reached the log stream: {logged}"
+
+    # The signal survives: a write happened, and roughly this big.
+    assert fields["args"]["markdown"] == f"<{len(snapshot)} chars>", fields
+    # Only the listed argument is suppressed; the rest still log normally.
+    assert fields["args"]["base_sha"] == "abc123", fields
 
 
 def test_cache_summary_counts_hits_and_misses():
@@ -598,12 +645,42 @@ def test_startup_is_logged_with_the_served_surface():
 
     starts = logs.with_message("startup")
     assert starts, "startup must leave a trace"
-    assert starts[0].fields["tools"] == 48, starts[0].fields
+    assert starts[0].fields["tools"] == 50, starts[0].fields
     assert starts[0].fields["prompts"] == 8, starts[0].fields
     # This suite runs with ALLOW_UNAUTHENTICATED=1, so auth is disabled and no
     # oauth store was ever registered — the local file store is what's live.
     assert starts[0].fields["auth"] == "disabled", starts[0].fields
     assert starts[0].fields["storage"] == "file", starts[0].fields
+    # A deploy reporting "readonly" writes adjustments to the Garmin calendar and
+    # silently never to the plan document, which is the whole failure this change
+    # exists to end — so the field has to track the token, not merely exist.
+    # Asserted in both directions and with the environment pinned: the developer
+    # running this may well have a token in their .env, and a test that quietly
+    # inverted its meaning depending on that would be worse than no test.
+    assert starts[0].fields["training_plan"] in ("readonly", "readwrite"), starts[0].fields
+
+
+def test_startup_reports_whether_the_plan_is_writable():
+    """The field must follow the token in both directions.
+
+    `readonly` on a real deploy means plan adjustments reach Garmin and silently
+    never reach the plan document — the exact failure the plan tools exist to
+    end, and invisible unless this line says so.
+    """
+    import garmlink.tools.plan as plan_mod
+
+    previous = os.environ.get("TRAINING_PLAN_GITHUB_TOKEN")
+    try:
+        os.environ.pop("TRAINING_PLAN_GITHUB_TOKEN", None)
+        assert plan_mod.has_write_token() is False
+
+        os.environ["TRAINING_PLAN_GITHUB_TOKEN"] = "ghp-anything"
+        assert plan_mod.has_write_token() is True
+    finally:
+        if previous is None:
+            os.environ.pop("TRAINING_PLAN_GITHUB_TOKEN", None)
+        else:
+            os.environ["TRAINING_PLAN_GITHUB_TOKEN"] = previous
 
 
 def test_our_own_log_message_names_survive_the_redactor():

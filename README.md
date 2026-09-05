@@ -1,6 +1,6 @@
 # garmlink
 
-A privacy-focused Garmin Connect MCP server for triathlon training. ~47 tools covering daily health metrics, activity analysis, training load, running, cycling, swimming, strength training, and workout creation — plus triathlon-specific analysis (brick workouts, sport volume balance, cross-sport fitness snapshots).
+A privacy-focused Garmin Connect MCP server for triathlon training. ~50 tools covering daily health metrics, activity analysis, training load, running, cycling, swimming, strength training, and workout creation — plus triathlon-specific analysis (brick workouts, sport volume balance, cross-sport fitness snapshots).
 
 Deployed as a remote MCP server over HTTPS. Connects to Claude Desktop or Claude Code via the streamable-HTTP transport.
 
@@ -49,7 +49,28 @@ Prerequisites: [gcloud](https://cloud.google.com/sdk/docs/install) and
    in the table below — `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`,
    `GITHUB_ALLOWED_USERS`, `PUBLIC_BASE_URL`, `READYZ_TOKEN` — aren't managed
    by this script yet, so set them by hand before deploying, with
-   `gcloud run services update garmlink --set-env-vars/--set-secrets`.
+   `gcloud run services update garmlink --set-env-vars/--set-secrets`. The same
+   applies to `TRAINING_PLAN_GITHUB_TOKEN` — without it the plan document is
+   readable but not writable. Create the secret and grant the runtime service
+   account access to it:
+
+   ```bash
+   gcloud secrets create TRAINING_PLAN_GITHUB_TOKEN --replication-policy=automatic
+   printf %s "<your PAT>" | \
+     gcloud secrets versions add TRAINING_PLAN_GITHUB_TOKEN --data-file=-
+
+   PROJECT_NUMBER=$(gcloud projects describe garmlink --format='value(projectNumber)')
+   gcloud secrets add-iam-policy-binding TRAINING_PLAN_GITHUB_TOKEN \
+     --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+     --role=roles/secretmanager.secretAccessor
+   ```
+
+   Do **not** attach it with `gcloud run services update --update-secrets`. The
+   deploy workflow uses `--set-secrets`, which replaces the service's entire
+   secret mapping — a hand-attached secret survives until the next push to
+   `main` and then disappears. `deploy.yml` lists this one, so creating the
+   secret is all that is needed; `printf` rather than `echo` because a trailing
+   newline in the value corrupts the `Authorization` header.
 
    Edit the variables at the top of the script first if you want a different
    project id, region, or service name.
@@ -155,6 +176,50 @@ current and a legacy collection. Outdoor rides still go through `create_workout`
 How they surface depends on the client: Claude Desktop lists them in its prompt
 menu, and Claude Code exposes them as `/mcp__garmlink__morning_check` and so on.
 
+## The Training Plan Document
+
+The prompts hold no athlete facts. Goals, race dates, the current block, the
+weekly template and the training zones live in a separate repo —
+[`knahsirV/training-plan`](https://github.com/knahsirV/training-plan), where
+`content/plan.md` is rendered by a static PWA on GitHub Pages — and are read at
+run time by `get_training_plan`.
+
+They used to be hardcoded in `prompts.py`, and the copy went stale exactly the
+way duplicated facts do: the prompts asserted "no race booked" and "swimming not
+yet started" for months after a half marathon was booked and swim sessions
+began, so `load_check` and `build_training_block` were coaching toward the wrong
+block. Method belongs in the prompts; facts belong in the plan.
+
+`update_training_plan` closes the loop, so an adjustment made from any MCP client
+— including a phone with no repo checked out — lands in the document as well as
+on the Garmin calendar. It is deliberately conservative:
+
+- **The whole file is replaced**, so a replacement more than 30% shorter than the
+  current one is refused as truncation unless `allow_shrink` is passed.
+- **Writes are optimistically locked** on the blob `sha` returned by
+  `get_training_plan`. An edit based on a stale read is refused rather than
+  silently discarding whatever landed in between.
+- **Render warnings, not render errors.** The PWA uses a hand-rolled markdown
+  subset (headings, bold, italic, inline code, tables, `-` lists, `---`), so a
+  write introducing ordered lists, links, blockquotes, nested lists or fenced
+  code blocks reports which lines will show as literal text — without blocking,
+  since the right fix is sometimes to extend the PWA's `render.js` instead.
+
+Nothing here knows the plan's structure. Sections can be reordered, the block
+renamed, tables restructured — `tests/test_training_plan.py` pins that with a
+deliberately reorganised document that must still validate.
+
+Without `TRAINING_PLAN_GITHUB_TOKEN` the plan is still readable (it is a public
+repo, rate-limited to 60 requests an hour) and writes refuse cleanly. The
+`startup` log line reports which mode is live:
+
+```
+INFO startup tools=50 prompts=8 ... training_plan=readwrite
+```
+
+`readonly` there means adjustments will reach the Garmin calendar and silently
+never reach the plan document.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -168,6 +233,10 @@ menu, and Claude Code exposes them as `/mcp__garmlink__morning_check` and so on.
 | `PUBLIC_BASE_URL` | **Required.** The service's externally reachable URL, e.g. `https://garmlink-moz6szqd6q-uc.a.run.app`. OAuth callback URLs (`/auth/callback`) are derived from it. |
 | `READYZ_TOKEN` | **Required.** Bearer token guarding `/readyz`, checked independently of OAuth so it still answers when the OAuth layer itself is broken. |
 | `ALLOW_UNAUTHENTICATED` | Set to `1` to run with no authentication, skipping the five variables above. Localhost development only — never on a public address. |
+| `TRAINING_PLAN_GITHUB_TOKEN` | Optional. Fine-grained PAT with **Contents: read and write**, scoped to the plan repo alone. Kept separate from `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` on purpose — those authenticate users into this server and have no business holding repo write access. Unset, the plan is read-only. |
+| `TRAINING_PLAN_REPO` | Optional. `owner/repo` holding the plan (default: `knahsirV/training-plan`). |
+| `TRAINING_PLAN_PATH` | Optional. Path to the plan file within that repo (default: `content/plan.md`). |
+| `TRAINING_PLAN_BRANCH` | Optional. Branch to read and write (default: `main`). |
 | `PORT` | Server port (default: 8000; Cloud Run injects 8080) |
 | `LOG_LEVEL` | `DEBUG`, `INFO` (default), `WARNING`, or `ERROR` |
 | `LOG_FORMAT` | `json` or `text`. Defaults to `json` on Cloud Run (detected via `K_SERVICE`), `text` elsewhere. |
