@@ -247,6 +247,8 @@ def test_plan_markdown_argument_is_never_logged():
     training plan are the athlete snapshot: birth date, weight, FTP, threshold
     HR. Truncation is not a privacy control when the sensitive part is the top of
     the document.
+
+    The fixture below is invented on purpose — see the comment on it.
     """
     server = FastMCP("parent")
     child = FastMCP("child")
@@ -258,9 +260,15 @@ def test_plan_markdown_argument_is_never_logged():
     server.mount(child)
     server.add_middleware(ToolCallLoggingMiddleware())
 
+    # Deliberately invented, and it must stay that way. This fixture stands in
+    # for the real athlete snapshot, so making it "realistic" would publish the
+    # very data the test exists to keep private — into a public repository, and
+    # into the ref of whatever pull request carried the change. The assertion
+    # below cares only that these strings do not survive into the log record;
+    # it works identically whether they are real or nonsense.
     snapshot = (
         "# Endurance Training Plan\n\n## Athlete Snapshot\n\n"
-        "- Born March 6, 2003 - FTP 182W - LTHR 180bpm - ~150lb / 5'7\"\n"
+        "- Born January 1, 1990 - FTP 999W - LTHR 111bpm - ~999lb / 9'9\"\n"
     )
 
     async def go():
@@ -275,7 +283,7 @@ def test_plan_markdown_argument_is_never_logged():
 
     fields = logs.with_message("tool.call")[0].fields
     logged = json.dumps(fields)
-    for leaked in ("March 6, 2003", "182W", "180bpm", "150lb"):
+    for leaked in ("January 1, 1990", "999W", "111bpm", "999lb"):
         assert leaked not in logged, f"{leaked!r} reached the log stream: {logged}"
 
     # The signal survives: a write happened, and roughly this big.

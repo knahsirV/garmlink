@@ -41,12 +41,14 @@ from garmlink.tools.plan import (  # noqa: E402
 )
 
 
-# A plan with the shape the real one has today.
+# The shape of the real plan, with invented numbers. These fixtures live in a
+# public repository, so they must never carry the athlete's actual physiology —
+# nothing here asserts on the values, only on the document's structure and size.
 CURRENT = """# Endurance Training Plan
 
 ## Athlete Snapshot
 
-- FTP 182W - Run VO2max 52 - LTHR 180bpm
+- FTP 999W - Run VO2max 99 - LTHR 111bpm
 
 ## Current Block: Half Marathon
 
@@ -82,7 +84,7 @@ REORGANISED = """# Ironman 2030 Roadmap
 
 ## Zones
 
-- FTP 195W - LTHR 178bpm
+- FTP 888W - LTHR 222bpm
 
 ## Current Block: Marathon Build
 
