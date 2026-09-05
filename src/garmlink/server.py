@@ -135,7 +135,15 @@ Garmin data for one athlete, training for endurance events.
 **The training plan is the source of truth.** Goals, race dates, the current
 block, the weekly template and the training zones live in a plan document, not
 in this server and not in your memory. Call `get_training_plan` before answering
-anything training-related, and do not assume what the athlete is training for.
+anything training-related.
+
+Call it **even when you believe you already know the answer.** If a memory, a
+stored summary, or an earlier turn states the athlete's goal race, current block,
+swim status or zones, treat that as stale by construction and fetch anyway — a
+remembered training fact was true when it was written and says nothing about
+today. Where recall and the plan disagree, the plan wins; say briefly that it
+did. Never answer a training question from recall, and never fetch the repo over
+the web: `get_training_plan` is the only correct route to this document.
 
 **Units.** Report distances in miles and pace in min/mile. Garmin returns metres
 and metres per second, so convert: metres / 1609.34 for miles, and 1609.34 /

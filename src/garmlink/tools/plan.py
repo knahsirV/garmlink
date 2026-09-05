@@ -203,8 +203,12 @@ async def get_training_plan() -> dict:
     """
     Fetch the athlete's training plan document — the source of truth for their goal
     race, current training block, weekly template, training zones and adjustment log.
-    Call this before any coaching analysis, workout design or plan adjustment, and
-    read the plan rather than assuming what the athlete is training for.
+    Call this before any coaching analysis, workout design or plan adjustment.
+
+    Call it even if you believe you already know the athlete's goals: remembered or
+    summarized training facts are stale by construction, because the plan changes and
+    the copy does not. This tool is also the only correct way to read the document —
+    fetching the repository over the web returns an HTML page, not the plan.
 
     Returns the plan markdown plus the blob `sha`, which update_training_plan needs
     in order to write safely.
