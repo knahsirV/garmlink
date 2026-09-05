@@ -118,6 +118,35 @@ def test_pace_target_converts_to_metres_per_second():
     assert 4.0 < step["targetValueOne"] < step["targetValueTwo"] < 4.3, step
 
 
+def test_goal_pace_in_miles_needs_pace_per_and_honours_it():
+    """The athlete trains in min/mile; the builder defaults to per-km.
+
+    plan.md prescribes a goal pace of 8:30/mile. Sent without `pace_per`, that
+    string is stored as 8:30 per *kilometre* — 1.96 m/s, about 13:41/mile, five
+    minutes a mile too slow — and it looks entirely plausible on the watch. The
+    two readings are pinned against each other here so the gap between them
+    cannot quietly close, and the step schema in prompts.py tells the model to
+    set `pace_per` on every pace step.
+    """
+    def speed(step_extra):
+        workout = build_workout("running", "goal pace", [
+            {"type": "interval", "distance_meters": 2414,
+             "target_type": "pace", "target_value": "8:30", **step_extra},
+        ])
+        step = _steps(workout)[0]
+        return (step["targetValueOne"] + step["targetValueTwo"]) / 2
+
+    per_mile = speed({"pace_per": "mile"})
+    defaulted = speed({})
+
+    # 8:30/mile is 510s per 1609.34m -> 3.156 m/s.
+    assert 3.1 < per_mile < 3.2, per_mile
+    # The default is per-km: 510s per 1000m -> 1.961 m/s.
+    assert 1.9 < defaulted < 2.0, defaulted
+    # ...which is a 61% error, not a rounding difference.
+    assert per_mile / defaulted > 1.5, (per_mile, defaulted)
+
+
 def test_swim_pace_is_read_as_per_100m():
     """Swimmers speak in per-100m; the same string must not mean per-km here."""
     workout = build_workout("swimming", "threshold", [
