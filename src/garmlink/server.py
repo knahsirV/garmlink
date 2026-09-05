@@ -29,6 +29,7 @@ from .tools.strength import mcp as strength_mcp
 from .tools.workouts import mcp as workouts_mcp
 from .tools.profile import mcp as profile_mcp
 from .tools.insights import mcp as insights_mcp
+from .tools.plan import has_write_token, mcp as plan_mcp
 from .prompts import mcp as coaching_mcp
 
 load_dotenv()
@@ -100,6 +101,9 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
         # A deploy where this says "ephemeral" will work until the first
         # token rotation and then fail every cold start.
         "garmin_tokens": "ephemeral" if token_store is None else "firestore",
+        # Reads work without a token; writes need one. "readonly" here means
+        # adjustments will reach the Garmin calendar but never the plan document.
+        "training_plan": "readwrite" if has_write_token() else "readonly",
     }})
 
     try:
@@ -132,6 +136,10 @@ mcp.mount(strength_mcp)
 mcp.mount(workouts_mcp)
 mcp.mount(profile_mcp)
 mcp.mount(insights_mcp)
+# The training plan document. Not a Garmin tool — it reads and writes the
+# plan repo over the GitHub Contents API — but it is what the coaching
+# prompts read their athlete context from, so it ships with them.
+mcp.mount(plan_mcp)
 
 # Coaching workflows, exposed as MCP prompts rather than tools.
 mcp.mount(coaching_mcp)

@@ -174,8 +174,26 @@ def _redact_value(value: Any) -> Any:
     return redact(text)[:_MAX_ARG_CHARS]
 
 
-def _redact_args(arguments: dict[str, Any]) -> dict[str, Any]:
-    return {k: _redact_value(v) for k, v in arguments.items()}
+# Arguments whose *value* must never be logged, even redacted and truncated.
+# `redact()` only masks token-shaped runs, so a large free-text argument passes
+# straight through it — and the first 200 characters of the training plan are the
+# athlete snapshot: birth date, weight, FTP, VO2max, threshold HR. That is
+# precisely the health data this middleware exists to keep out of the log stream,
+# arriving by the one path (arguments) that results-are-never-logged does not
+# cover. Replaced with a length summary, which keeps the useful signal — a write
+# happened, roughly this big — and none of the content.
+_OPAQUE_ARGS: frozenset[tuple[str, str]] = frozenset({
+    ("update_training_plan", "markdown"),
+})
+
+
+def _redact_args(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        k: f"<{len(v) if isinstance(v, str) else len(repr(v))} chars>"
+        if (tool_name, k) in _OPAQUE_ARGS
+        else _redact_value(v)
+        for k, v in arguments.items()
+    }
 
 
 class ToolCallLoggingMiddleware(Middleware):
@@ -191,12 +209,15 @@ class ToolCallLoggingMiddleware(Middleware):
     request log all 45 tools are the same `POST /mcp`.
 
     Arguments are logged, redacted and truncated; **results never are**. Results
-    are the health data this server exists to protect, and they are large.
+    are the health data this server exists to protect, and they are large. A few
+    arguments are health data too — see `_OPAQUE_ARGS`, which replaces those with
+    a length summary rather than trusting truncation to cut before anything
+    identifying.
     """
 
     async def on_call_tool(self, context: Any, call_next: Any) -> Any:
         name = getattr(context.message, "name", "unknown")
-        args = _redact_args(getattr(context.message, "arguments", None) or {})
+        args = _redact_args(name, getattr(context.message, "arguments", None) or {})
         started = time.perf_counter()
 
         def elapsed_ms() -> float:
