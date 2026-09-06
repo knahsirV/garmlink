@@ -11,12 +11,14 @@ from typing import AsyncIterator
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from mcp.types import Icon
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .auth_provider import build_auth_provider, resolve_readyz_token
 from .client import GarminClient
 from .deps import get_garmin_or_none, get_oauth_store, set_client, set_oauth_store
+from .icon import ICON_DATA_URI, ICON_SIZES
 from .logs import ToolCallLoggingMiddleware, logger, setup_logging
 from .tokens import GarminTokenStore
 from .tools.daily import mcp as daily_mcp
@@ -160,7 +162,12 @@ to reason, never to edit the document.
 document shows the change and waits for an explicit yes first.
 """
 
-mcp = FastMCP("garmlink", instructions=INSTRUCTIONS, lifespan=lifespan)
+mcp = FastMCP(
+    "garmlink",
+    instructions=INSTRUCTIONS,
+    lifespan=lifespan,
+    icons=[Icon(src=ICON_DATA_URI, sizes=ICON_SIZES)],
+)
 
 # Mount all tool sub-servers onto the main app.
 mcp.mount(daily_mcp)
