@@ -59,6 +59,10 @@ TOOLS = [
                                  "end_date": "2026-08-20"}),    # strength
     ("get_workouts", {}),                                       # workouts
     ("get_wellness_snapshot", {"date_str": "2026-08-20"}),      # insights
+    ("get_session_counts", {"days": 28}),                       # coaching
+    ("get_progression_check", {"sport": "running", "days": 30}),
+    ("get_intensity_distribution", {"days": 28}),
+    ("get_recovery_trend", {"days": 28}),
 ]
 
 

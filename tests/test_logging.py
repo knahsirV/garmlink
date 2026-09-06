@@ -653,7 +653,11 @@ def test_startup_is_logged_with_the_served_surface():
 
     starts = logs.with_message("startup")
     assert starts, "startup must leave a trace"
-    assert starts[0].fields["tools"] == 50, starts[0].fields
+    # 50 Garmin/plan tools plus the four computed coaching primitives
+    # (session counts, progression check, intensity distribution,
+    # recovery trend). Pinned deliberately: this count is the only thing
+    # that catches a sub-server that silently failed to mount.
+    assert starts[0].fields["tools"] == 54, starts[0].fields
     assert starts[0].fields["prompts"] == 8, starts[0].fields
     # This suite runs with ALLOW_UNAUTHENTICATED=1, so auth is disabled and no
     # oauth store was ever registered — the local file store is what's live.

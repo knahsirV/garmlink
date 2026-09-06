@@ -31,6 +31,7 @@ from .tools.strength import mcp as strength_mcp
 from .tools.workouts import mcp as workouts_mcp
 from .tools.profile import mcp as profile_mcp
 from .tools.insights import mcp as insights_mcp
+from .tools.coaching import mcp as coaching_tools_mcp
 from .tools.plan import has_write_token, mcp as plan_mcp
 from .prompts import mcp as coaching_mcp
 
@@ -150,7 +151,23 @@ the web: `get_training_plan` is the only correct route to this document.
 **Units.** Report distances in miles and pace in min/mile. Garmin returns metres
 and metres per second, so convert: metres / 1609.34 for miles, and 1609.34 /
 speed seconds for min/mile. Swimming is the exception — report it in metres and
-per-100m, which is how the sport is trained. Power stays in watts.
+per-100m, which is how the sport is trained. Power stays in watts, and lifting
+stays in pounds — Garmin stores set weight in grams, so a 50lb curl arrives as
+22687.
+
+**Read the plan against what was actually done.** A prescription and a record of
+training are different things, and this athlete's have diverged far enough that
+reading the plan alone gives the wrong answer. Before judging a week, call
+`get_session_counts`; before approving a longer run, `get_progression_check`;
+before progressing anything, `get_recovery_trend`. Sleep outranks training load
+here: under 7 hours a night carries roughly 51% higher injury risk in endurance
+athletes, a larger and better-evidenced effect than any acute:chronic ratio.
+
+**Garmin does not go back forever.** It holds nothing from before the device was
+first used, and answers a longer lookback with less data rather than an error, so
+a rate computed over a window that reaches too far back is confidently wrong and
+low. The coaching tools report the window they actually covered — quote that one,
+not the one requested.
 
 **The plan is public.** It lives in a public repository, so never write the
 athlete's birth date, age, height or body weight into it. Keep FTP, VO2max,
@@ -180,6 +197,7 @@ mcp.mount(strength_mcp)
 mcp.mount(workouts_mcp)
 mcp.mount(profile_mcp)
 mcp.mount(insights_mcp)
+mcp.mount(coaching_tools_mcp)
 # The training plan document. Not a Garmin tool — it reads and writes the
 # plan repo over the GitHub Contents API — but it is what the coaching
 # prompts read their athlete context from, so it ships with them.

@@ -124,9 +124,10 @@ class _FakeClient:
 
     async def get(self, url, **kwargs) -> _FakeResponse:
         self._script.gets.append((url, kwargs))
-        if isinstance(self._script.get_response, Exception):
-            raise self._script.get_response
-        return self._script.get_response
+        response = self._script.response_for(url.split("/contents/", 1)[1])
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     async def put(self, url, **kwargs) -> _FakeResponse:
         self._script.puts.append((url, kwargs))
@@ -136,11 +137,36 @@ class _FakeClient:
 
 
 class _Script:
-    def __init__(self, get_response=None, put_response=None):
+    """Scripted GitHub responses, keyed by content path.
+
+    `parts` scripts each path explicitly. A bare `get_response` instead
+    describes a repo holding only the primary file, which is the state every
+    single-file test here was written against and is also the real state before
+    the document is split — so the other parts answer 404.
+    """
+
+    def __init__(self, get_response=None, put_response=None, parts=None):
         self.get_response = get_response
         self.put_response = put_response
+        self.parts: dict = parts or {}
         self.gets: list = []
         self.puts: list = []
+
+    def response_for(self, path: str):
+        if self.parts:
+            return self.parts.get(path, _FakeResponse(404))
+        if isinstance(self.get_response, Exception) or self.get_response is None:
+            return self.get_response or _FakeResponse(404)
+        return (
+            self.get_response
+            if path == PRIMARY
+            else _FakeResponse(404)
+        )
+
+
+PRIMARY = "content/plan.md"
+REFERENCE = "content/reference.md"
+LOG = "content/log.md"
 
 
 def _contents_response(markdown: str, sha: str = "sha-current") -> _FakeResponse:
@@ -362,11 +388,13 @@ def test_get_training_plan_returns_markdown_and_sha():
 
 def test_config_defaults_and_overrides():
     with _env(
-        TRAINING_PLAN_REPO=None, TRAINING_PLAN_PATH=None, TRAINING_PLAN_BRANCH=None
+        TRAINING_PLAN_REPO=None, TRAINING_PLAN_PATH=None, TRAINING_PLAN_PATHS=None,
+        TRAINING_PLAN_BRANCH=None,
     ):
         defaults = plan._config()
     assert defaults["repo"] == "knahsirV/training-plan", defaults
-    assert defaults["path"] == "content/plan.md", defaults
+    assert defaults["path"] == PRIMARY, defaults
+    assert defaults["paths"] == [PRIMARY, REFERENCE, LOG], defaults
     assert defaults["branch"] == "main", defaults
 
     with _env(TRAINING_PLAN_REPO="me/other", TRAINING_PLAN_BRANCH="draft"):
@@ -376,11 +404,19 @@ def test_config_defaults_and_overrides():
 
 
 def test_read_is_cached_within_the_ttl():
+    """One request per part on the first read, and none at all on the second.
+
+    A part that answered 404 must cache too, or a split document that has not
+    been created yet re-requests the missing files on every single read.
+    """
     script = _Script(get_response=_contents_response(CURRENT))
     with _http(script):
         asyncio.run(plan.get_training_plan())
+        first = len(script.gets)
         asyncio.run(plan.get_training_plan())
-    assert len(script.gets) == 1, f"expected one request, made {len(script.gets)}"
+    expected = len(plan._config()["paths"])
+    assert first == expected, f"expected {expected} requests, made {first}"
+    assert len(script.gets) == first, "the second read went back to GitHub"
 
 
 def test_missing_plan_reports_the_configuration_to_check():
@@ -459,7 +495,9 @@ def test_successful_write_invalidates_the_read_cache():
     with _with_token(), _http(script):
         asyncio.run(plan.get_training_plan())          # populates the cache
         asyncio.run(plan.update_training_plan(new, "sha-current", "msg"))
-        assert not plan._cache.contains(plan._CACHE_KEY), "cache survived a write"
+        assert not plan._cache.contains(
+            plan._cache_key(PRIMARY)
+        ), "cache survived a write"
 
 
 def test_render_warnings_are_reported_but_never_block_the_write():
@@ -492,6 +530,167 @@ def test_forbidden_write_names_the_scope_the_token_needs():
     )
     result = _write(CURRENT + "\nA note.\n", "sha-current", script)
     assert "Contents" in result["error"], result
+
+
+# ---------------------------------------------------------------------------
+# The split document
+# ---------------------------------------------------------------------------
+
+REFERENCE_MD = "## Training Zones\n\nEasy 145-160bpm.\n"
+LOG_MD = "## Adjustment Log\n\n| Date | Change |\n|---|---|\n| Sep 6 | rebuilt |\n"
+
+
+def _split_script(put_response=None) -> _Script:
+    return _Script(
+        parts={
+            PRIMARY: _contents_response(CURRENT, "sha-plan"),
+            REFERENCE: _contents_response(REFERENCE_MD, "sha-reference"),
+            LOG: _contents_response(LOG_MD, "sha-log"),
+        },
+        put_response=put_response,
+    )
+
+
+def test_every_part_is_returned_with_its_own_sha():
+    with _http(_split_script()):
+        result = asyncio.run(plan.get_training_plan())
+
+    paths = [part["path"] for part in result["parts"]]
+    assert paths == [PRIMARY, REFERENCE, LOG], result
+    shas = [part["sha"] for part in result["parts"]]
+    assert shas == ["sha-plan", "sha-reference", "sha-log"], result
+    # A stale sha check is per part, so two parts must never share one.
+    assert len(set(shas)) == 3, shas
+
+
+def test_parts_are_joined_in_configured_order():
+    """render.js takes the FIRST table matching a set of column names, so the
+    block's tables have to precede the reference's. Order is the contract."""
+    with _http(_split_script()):
+        result = asyncio.run(plan.get_training_plan())
+
+    joined = result["markdown"]
+    assert joined.index(CURRENT) < joined.index(REFERENCE_MD) < joined.index(LOG_MD)
+    assert result["sha"] == "sha-plan", "top-level sha must be the primary part's"
+
+
+def test_a_missing_secondary_part_is_skipped_not_fatal():
+    """The parts arrive one commit at a time; a read during that must still work."""
+    script = _Script(parts={PRIMARY: _contents_response(CURRENT, "sha-plan")})
+    with _http(script):
+        result = asyncio.run(plan.get_training_plan())
+
+    assert "error" not in result, result
+    assert [part["path"] for part in result["parts"]] == [PRIMARY], result
+    assert result["markdown"] == CURRENT, result
+
+
+def test_a_missing_primary_part_is_still_an_error():
+    script = _Script(parts={REFERENCE: _contents_response(REFERENCE_MD)})
+    with _http(script):
+        result = asyncio.run(plan.get_training_plan())
+    assert "TRAINING_PLAN_REPO" in result.get("error", ""), result
+
+
+def test_writing_a_secondary_part_does_not_require_an_h1():
+    """The reference and log legitimately start at '##'. The H1 check is written
+    for the file that carries the document title, and applies only to it."""
+    script = _split_script(
+        put_response=_FakeResponse(200, {"commit": {"sha": "c", "html_url": "u"}})
+    )
+    with _with_token(), _http(script):
+        result = asyncio.run(plan.update_training_plan(
+            REFERENCE_MD + "\nAnd a further paragraph of reference material.\n",
+            "sha-reference", "extend the reference", path=REFERENCE,
+        ))
+
+    assert result.get("status") == "written", result
+    assert result["path"] == REFERENCE, result
+    assert script.puts[0][0].endswith(REFERENCE), script.puts[0][0]
+
+
+def test_a_secondary_part_write_uses_its_own_sha_not_the_primary_one():
+    script = _split_script(
+        put_response=_FakeResponse(200, {"commit": {"sha": "c", "html_url": "u"}})
+    )
+    with _with_token(), _http(script):
+        result = asyncio.run(plan.update_training_plan(
+            LOG_MD + "| Sep 7 | another row |\n", "sha-plan", "log", path=LOG,
+        ))
+    assert "stale" in result.get("error", ""), result
+
+
+def test_a_part_that_does_not_exist_yet_is_created():
+    """Creating content/log.md for the first time: no sha, and GitHub must not
+    be sent one, or it answers 422."""
+    script = _Script(
+        parts={PRIMARY: _contents_response(CURRENT, "sha-plan")},
+        put_response=_FakeResponse(201, {"commit": {"sha": "c", "html_url": "u"}}),
+    )
+    with _with_token(), _http(script):
+        result = asyncio.run(plan.update_training_plan(
+            LOG_MD, "", "create the log", path=LOG,
+        ))
+
+    assert result.get("status") == "written", result
+    assert "sha" not in script.puts[0][1]["json"], script.puts[0][1]["json"]
+
+
+def test_creating_a_part_is_not_refused_as_a_shrink():
+    """current is empty for a new part, and 0.7 * 0 must not refuse the write."""
+    script = _Script(
+        parts={PRIMARY: _contents_response(CURRENT, "sha-plan")},
+        put_response=_FakeResponse(201, {"commit": {"sha": "c", "html_url": "u"}}),
+    )
+    with _with_token(), _http(script):
+        result = asyncio.run(plan.update_training_plan(
+            "## Log\n", "", "create", path=LOG,
+        ))
+    assert result.get("status") == "written", result
+
+
+def test_an_unknown_path_is_refused_before_any_write():
+    script = _split_script()
+    with _with_token(), _http(script):
+        result = asyncio.run(plan.update_training_plan(
+            CURRENT, "sha-plan", "msg", path="content/notes.md",
+        ))
+    assert "not one of this plan" in result.get("error", ""), result
+    assert not script.puts, "refused write still hit GitHub"
+
+
+def test_moving_personal_data_between_parts_is_not_read_as_introducing_it():
+    """The guard's rule is 'a pattern the plan does not already carry'. Judged
+    per part instead, relocating a line would look like adding one."""
+    weighted = CURRENT + "\nBack squat 185lb for 5.\n"
+    script = _Script(
+        parts={
+            PRIMARY: _contents_response(weighted, "sha-plan"),
+            REFERENCE: _contents_response(REFERENCE_MD, "sha-reference"),
+        },
+        put_response=_FakeResponse(200, {"commit": {"sha": "c", "html_url": "u"}}),
+    )
+    with _with_token(), _http(script):
+        result = asyncio.run(plan.update_training_plan(
+            REFERENCE_MD + "\nBack squat 185lb for 5.\n",
+            "sha-reference", "move the note", path=REFERENCE,
+        ))
+    assert result.get("status") == "written", result
+
+
+def test_the_split_plan_files_pass_their_own_guard():
+    """The real documents in the sister repo, checked against the real rules."""
+    root = Path(__file__).resolve().parent.parent.parent / "training-plan" / "content"
+    if not root.exists():
+        return
+    primary = (root / "plan.md").read_text()
+    validate_plan_update(primary, primary)
+    for name in ("reference.md", "log.md"):
+        part = root / name
+        if part.exists():
+            text = part.read_text()
+            validate_plan_update(text, text, require_heading=False)
+            assert not render_warnings(text), render_warnings(text)
 
 
 def _run_all():

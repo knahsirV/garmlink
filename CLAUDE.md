@@ -49,10 +49,28 @@ checking CI + the Docker image (both 3.12).
 - `src/garmlink/server.py` — FastMCP app, tool/prompt registration.
 - `src/garmlink/tools/` — one module per sport/domain (`running.py`,
   `cycling.py`, `swimming.py`, `strength.py`, `daily.py`, `training.py`,
-  `insights.py`, `workouts.py`, `plan.py`).
-- `tools/plan.py` — reads/writes `knahsirV/training-plan` `content/plan.md` via
-  the GitHub Contents API. The plan is the source of truth for training facts;
-  prompts read it at runtime rather than hardcoding goals/zones.
+  `insights.py`, `coaching.py`, `workouts.py`, `plan.py`).
+- `tools/coaching.py` — the computed coaching primitives (session counts,
+  progression check, intensity distribution, recovery trend). Arithmetic only;
+  the judgement stays in `prompts.py`. Everything else in `tools/` hands Garmin's
+  payload to the model with a `note` telling it what to work out, which is the
+  right split for judgement and the wrong one for a mean.
+- `sports.py` — the Garmin activity vocabulary and unit conversions, shared so
+  the tools cannot disagree. `virtual_ride` is cycling (read literally it matches
+  no bike substring, and bike volume then reads far too low); set weight is in
+  grams, distance in metres.
+- `tools/plan.py` — reads/writes `knahsirV/training-plan` via the GitHub Contents
+  API. The document is **split across three files** (`content/plan.md`,
+  `reference.md`, `log.md`); `get_training_plan` returns them joined plus a
+  `parts` list carrying each file's own `sha`, and `update_training_plan` takes a
+  `path` and writes one part per call. Only the primary part is required to exist
+  or to carry an H1.
+
+  **This module deliberately does not parse the plan** (`plan.py:151`). It
+  hardcodes no heading, section or table name, so the document can be
+  reorganised without touching the server — a validator that knew the shape
+  would need editing every time the shape changed. `render.js` in the sister repo
+  is the only structural consumer.
 - `auth_provider.py` / `auth.py` / `tokens.py` — GitHub OAuth for connector
   users; Garmin token storage (Firestore in prod, file locally).
 

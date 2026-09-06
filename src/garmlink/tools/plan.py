@@ -21,6 +21,7 @@ the GitHub Contents API instead.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import os
@@ -38,8 +39,20 @@ mcp = FastMCP("plan")
 # while never serving a stale plan into the *next* conversation.
 PLAN_TTL: float = 60
 
-_CACHE_KEY = ("get_training_plan", (), frozenset())
+# Keyed by path so each part caches and expires independently. The first
+# element stays "get_training_plan" because TTLCache.invalidate() matches on it,
+# so one invalidate() after a write still clears every part.
+def _cache_key(path: str) -> tuple[str, tuple, frozenset]:
+    return ("get_training_plan", (path,), frozenset())
+
+
 _cache = TTLCache()
+
+# The document is split by volatility: the block changes weekly, the reference
+# rarely, the log only ever grows. They are concatenated in this order on read,
+# which matters to the PWA — render.js takes the *first* table matching a set of
+# column names, so the current block's tables must come before the reference's.
+_DEFAULT_PATHS = "content/plan.md,content/reference.md,content/log.md"
 
 _API = "https://api.github.com"
 _TIMEOUT = httpx.Timeout(10.0)
@@ -79,7 +92,7 @@ class PlanError(Exception):
     """Anything that should reach the user as a plain message, not a traceback."""
 
 
-def _config() -> dict[str, str]:
+def _config() -> dict:
     """Resolve configuration at call time, not import time, so tests can patch env.
 
     Deliberately not named `GITHUB_*`: `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`
@@ -87,9 +100,25 @@ def _config() -> dict[str, str]:
     different scope. Reusing them would hand the MCP server's login app write
     access to a repository.
     """
+    paths = [
+        part.strip()
+        for part in os.getenv("TRAINING_PLAN_PATHS", _DEFAULT_PATHS).split(",")
+        if part.strip()
+    ]
+    # TRAINING_PLAN_PATH (singular) predates the split and still wins if set, so
+    # an existing deployment keeps working without touching its environment.
+    single = os.getenv("TRAINING_PLAN_PATH", "").strip()
+    if single:
+        paths = [single]
+    if not paths:
+        paths = [_DEFAULT_PATHS.split(",")[0]]
+
     return {
         "repo": os.getenv("TRAINING_PLAN_REPO", "knahsirV/training-plan"),
-        "path": os.getenv("TRAINING_PLAN_PATH", "content/plan.md"),
+        "paths": paths,
+        # The part carrying the document's H1. Only this one is required to
+        # exist, and only this one is checked for a top-level heading.
+        "path": paths[0],
         "branch": os.getenv("TRAINING_PLAN_BRANCH", "main"),
         "token": os.getenv("TRAINING_PLAN_GITHUB_TOKEN", ""),
     }
@@ -147,6 +176,7 @@ def validate_plan_update(
     *,
     allow_shrink: bool = False,
     allow_personal_data: bool = False,
+    require_heading: bool = True,
 ) -> None:
     """Raise `PlanError` if `new` looks like a damaged replacement for `current`.
 
@@ -156,11 +186,15 @@ def validate_plan_update(
     document's shape would have to be edited every time it did. What it does
     know is that a write replaces the whole file, so the failure worth catching
     is losing part of it.
+
+    `require_heading` is off for the parts of a split document that do not carry
+    the H1. The reference and log files legitimately start at `##`, and a check
+    written for a single-file plan would refuse every write to them.
     """
     if not new.strip():
         raise PlanError("Refusing to write an empty plan.")
 
-    if not re.search(r"^#\s+\S", new, re.MULTILINE):
+    if require_heading and not re.search(r"^#\s+\S", new, re.MULTILINE):
         raise PlanError(
             "Refusing to write: the new plan has no top-level heading, which "
             "usually means the beginning of the document was lost. Any '# Title' "
@@ -227,20 +261,30 @@ def render_warnings(markdown: str) -> list[str]:
 # GitHub Contents API
 # ---------------------------------------------------------------------------
 
-async def _fetch_plan() -> dict:
-    """GET the plan, uncached. Returns the tool's payload shape."""
+async def _fetch_part(path: str) -> dict | None:
+    """GET one part of the plan, uncached. `None` if it does not exist yet.
+
+    A missing part is not an error for anything but the primary file. The
+    document is split across several files and they arrive one commit at a
+    time, so during a reorganisation the reference or log may not exist yet;
+    hard-failing the whole read because of that would make the tool useless
+    exactly when the plan is being restructured.
+    """
     cfg = _config()
-    url = f"{_API}/repos/{cfg['repo']}/contents/{cfg['path']}"
+    url = f"{_API}/repos/{cfg['repo']}/contents/{path}"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
         response = await http.get(
             url, params={"ref": cfg["branch"]}, headers=_headers(cfg["token"])
         )
 
     if response.status_code == 404:
-        raise PlanError(
-            f"No plan at {cfg['repo']}/{cfg['path']} on branch {cfg['branch']}. "
-            "Check TRAINING_PLAN_REPO, TRAINING_PLAN_PATH and TRAINING_PLAN_BRANCH."
-        )
+        if path == cfg["path"]:
+            raise PlanError(
+                f"No plan at {cfg['repo']}/{path} on branch {cfg['branch']}. "
+                "Check TRAINING_PLAN_REPO, TRAINING_PLAN_PATHS and "
+                "TRAINING_PLAN_BRANCH."
+            )
+        return None
     if response.status_code in (401, 403):
         raise PlanError(
             "GitHub refused the read "
@@ -249,19 +293,46 @@ async def _fetch_plan() -> dict:
             "private repositories."
         )
     if response.status_code != 200:
-        raise PlanError(f"GitHub returned {response.status_code} reading the plan.")
+        raise PlanError(f"GitHub returned {response.status_code} reading {path}.")
 
     body = response.json()
     try:
         markdown = base64.b64decode(body["content"]).decode("utf-8")
     except (KeyError, binascii.Error, UnicodeDecodeError) as exc:
-        raise PlanError(f"Could not decode the plan file: {exc}") from exc
+        raise PlanError(f"Could not decode {path}: {exc}") from exc
 
     return {
+        "path": path,
         "markdown": markdown,
         "sha": body["sha"],
+    }
+
+
+async def _fetch_plan() -> dict:
+    """GET every configured part and assemble the tool's payload shape.
+
+    Parts are fetched concurrently but assembled in configured order, because
+    the join order is part of the contract with the PWA's renderer.
+    """
+    cfg = _config()
+    fetched = await asyncio.gather(*(_fetch_part(path) for path in cfg["paths"]))
+    parts = [part for part in fetched if part is not None]
+
+    joined = "\n\n".join(part["markdown"] for part in parts)
+    primary = next(
+        (part for part in parts if part["path"] == cfg["path"]), parts[0]
+    )
+
+    return {
+        # The whole document, in render order. Prompts that just want to read
+        # the plan use this and never need to know it is split.
+        "markdown": joined,
+        "parts": parts,
+        # The primary part's sha and path, so a caller written against the
+        # single-file shape still gets a usable pair.
+        "sha": primary["sha"],
+        "path": primary["path"],
         "repo": cfg["repo"],
-        "path": cfg["path"],
         "branch": cfg["branch"],
     }
 
@@ -278,19 +349,39 @@ async def get_training_plan() -> dict:
     the copy does not. This tool is also the only correct way to read the document —
     fetching the repository over the web returns an HTML page, not the plan.
 
-    Returns the plan markdown plus the blob `sha`, which update_training_plan needs
-    in order to write safely.
+    The document is split across several files by how often they change. `markdown`
+    is all of them joined in render order and is what you want for reading. `parts`
+    lists each file with its own `path` and `sha`; update_training_plan writes one
+    part at a time and needs the `sha` of the part being changed.
     """
-    hit = _cache.get(_CACHE_KEY)
-    if hit is not None:
-        return hit
+    cfg = _config()
+    keys = [_cache_key(path) for path in cfg["paths"]]
+    if all(_cache.contains(key) for key in keys):
+        cached = [_cache.get(key) for key in keys]
+        parts = [part for part in cached if part is not None]
+        if parts:
+            primary = next(
+                (part for part in parts if part["path"] == cfg["path"]), parts[0]
+            )
+            return {
+                "markdown": "\n\n".join(part["markdown"] for part in parts),
+                "parts": parts,
+                "sha": primary["sha"],
+                "path": primary["path"],
+                "repo": cfg["repo"],
+                "branch": cfg["branch"],
+            }
+
     try:
         result = await _fetch_plan()
     except PlanError as exc:
         return {"error": str(exc)}
     except httpx.HTTPError as exc:
         return {"error": f"Could not reach GitHub to read the plan: {exc}"}
-    _cache.set(_CACHE_KEY, result, PLAN_TTL)
+
+    by_path = {part["path"]: part for part in result["parts"]}
+    for path in cfg["paths"]:
+        _cache.set(_cache_key(path), by_path.get(path), PLAN_TTL)
     return result
 
 
@@ -299,21 +390,30 @@ async def update_training_plan(
     markdown: str,
     base_sha: str,
     message: str,
+    path: str = "",
     allow_shrink: bool = False,
     allow_personal_data: bool = False,
 ) -> dict:
     """
-    Write a new version of the training plan document, replacing it entirely.
-    Use after the athlete has explicitly approved the change — always show the exact
-    text that will change and wait for a yes, because this replaces the whole file.
+    Write a new version of ONE part of the training plan document, replacing that
+    file entirely. Use after the athlete has explicitly approved the change — always
+    show the exact text that will change and wait for a yes, because this replaces
+    the whole file.
+
+    The plan is split across several files. Send only the part you are changing:
+    rewriting the whole document into one part would destroy the split. To change
+    two parts, call this twice.
 
     Args:
-        markdown:     The complete new plan document. Not a fragment or a diff —
-                      whatever is sent becomes the entire file.
-        base_sha:     The `sha` from the get_training_plan call this edit is based
-                      on. If the plan changed since then, the write is rejected
-                      rather than silently overwriting the other change.
+        markdown:     The complete new content for this part. Not a fragment or a
+                      diff — whatever is sent becomes the entire file.
+        base_sha:     The `sha` of THIS PART, from the `parts` list returned by
+                      get_training_plan. If it changed since then, the write is
+                      rejected rather than silently overwriting the other change.
+                      Pass "" to create a part that does not exist yet.
         message:      Commit message describing the adjustment.
+        path:         Which part to write, e.g. "content/reference.md". Defaults
+                      to the primary part (the one carrying the document title).
         allow_shrink: Permit a new version more than 30% shorter than the current
                       one. Off by default, because that is normally truncation.
         allow_personal_data: Permit text that looks like a birth date, age, height
@@ -332,20 +432,58 @@ async def update_training_plan(
             "TRAINING_PLAN_GITHUB_TOKEN is not configured on this server."
         }
 
+    target = path.strip() or cfg["path"]
+    if target not in cfg["paths"]:
+        return {
+            "error": f"{target!r} is not one of this plan's parts: "
+            + ", ".join(cfg["paths"])
+            + ". Call get_training_plan to see them."
+        }
+
     try:
         current = await _fetch_plan()
+        existing = next(
+            (part for part in current["parts"] if part["path"] == target), None
+        )
         validate_plan_update(
             markdown,
-            current["markdown"],
+            existing["markdown"] if existing else "",
             allow_shrink=allow_shrink,
-            allow_personal_data=allow_personal_data,
+            # Checked below against the whole document instead of this part
+            # alone, so the validator must not also check it against the part.
+            allow_personal_data=True,
+            # Only the primary part carries the document's H1; the reference and
+            # log legitimately start at '##'.
+            require_heading=(target == cfg["path"]),
         )
+        # Personal data is judged against the WHOLE document, not just this
+        # part. The guard's rule is "a pattern the plan does not already carry",
+        # and moving a line from one part to another must not read as newly
+        # introducing it.
+        if not allow_personal_data:
+            added = _new_personal_data(markdown, current["markdown"])
+            if added:
+                raise PlanError(
+                    "Refusing to write: this adds what looks like personal data "
+                    "to a public repository — " + "; ".join(added) + ". The plan "
+                    "documents training, not identity: keep FTP, VO2max, "
+                    "threshold HR and the zones, and leave out birth date, age, "
+                    "height and body weight. Remove it and resend. If this is a "
+                    "false positive (a lifting load, a race date), pass "
+                    "allow_personal_data=true."
+                )
     except PlanError as exc:
         return {"error": str(exc)}
     except httpx.HTTPError as exc:
         return {"error": f"Could not reach GitHub to read the plan: {exc}"}
 
-    if current["sha"] != base_sha:
+    existing_sha = existing["sha"] if existing else ""
+    if existing_sha != base_sha:
+        if not existing:
+            return {
+                "error": f"{target} does not exist yet, so it can only be "
+                "created — pass base_sha=\"\" to create it."
+            }
         return {
             "error": "The plan changed since it was read (base_sha is stale). "
             "Call get_training_plan again, re-apply the edit to the current "
@@ -353,13 +491,15 @@ async def update_training_plan(
             "changed in between."
         }
 
-    url = f"{_API}/repos/{cfg['repo']}/contents/{cfg['path']}"
+    url = f"{_API}/repos/{cfg['repo']}/contents/{target}"
     payload = {
         "message": message,
         "content": base64.b64encode(markdown.encode("utf-8")).decode("ascii"),
-        "sha": base_sha,
         "branch": cfg["branch"],
     }
+    # GitHub creates the file when `sha` is absent and updates it when present.
+    if base_sha:
+        payload["sha"] = base_sha
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
             response = await http.put(
@@ -382,7 +522,9 @@ async def update_training_plan(
             "Contents: read and write on this repository."
         }
     if response.status_code not in (200, 201):
-        return {"error": f"GitHub returned {response.status_code} writing the plan."}
+        return {
+            "error": f"GitHub returned {response.status_code} writing {target}."
+        }
 
     # The document just changed; the next reader must not get the old one.
     _cache.invalidate("get_training_plan")
@@ -393,7 +535,7 @@ async def update_training_plan(
         "commit_sha": commit.get("sha"),
         "commit_url": commit.get("html_url"),
         "repo": cfg["repo"],
-        "path": cfg["path"],
+        "path": target,
     }
     warnings = render_warnings(markdown)
     if warnings:

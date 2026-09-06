@@ -88,6 +88,13 @@ jobs:
       - name: Training plan read/write and structure independence
         run: python tests/test_training_plan.py
 
+      # Pure arithmetic over fixtures: no Garmin client, no network.
+      - name: Coaching primitives
+        env:
+          GARMIN_EMAIL: test@example.com
+          ALLOW_UNAUTHENTICATED: '1'
+        run: python tests/test_coaching.py
+
   deploy:
     needs: test
     runs-on: ubuntu-latest

@@ -11,6 +11,7 @@ from fastmcp import Context, FastMCP
 from ..cache import ACTIVITY_TTL, HEALTH_TTL
 from ..deps import get_garmin
 from ..ranges import MAX_RANGE_CONCURRENCY, build_date_list, fetch_per_day
+from ..sports import summarize_activity
 
 mcp = FastMCP("insights")
 
@@ -53,7 +54,8 @@ async def get_training_overview(date_str: str, ctx: Context) -> dict:
     Args:
         date_str: Reference date (usually today) in YYYY-MM-DD format.
 
-    Returns training load classification, VO2max trend, readiness score, and recent activity list.
+    Returns training load classification, VO2max trend, readiness score, and a
+    summarized recent-activity list.
     """
     client = get_garmin(ctx)
 
@@ -67,12 +69,94 @@ async def get_training_overview(date_str: str, ctx: Context) -> dict:
     )
     return {
         "date": date_str,
-        "training_load": None if isinstance(load, BaseException) else load,
-        "readiness": None if isinstance(readiness, BaseException) else readiness,
+        "training_load": (
+            None if isinstance(load, BaseException) else _summarize_load(load)
+        ),
+        "readiness": (
+            None if isinstance(readiness, BaseException)
+            else _summarize_readiness(readiness)
+        ),
+        # Summarized, not raw. Garmin returns 81 fields per activity, so 20 of
+        # them is ~88,000 characters of mostly device metadata — which buries
+        # the handful of numbers this tool exists to surface.
         "recent_activities": (
-            None if isinstance(activities, BaseException) else activities
+            None if isinstance(activities, BaseException)
+            else [summarize_activity(a) for a in (activities or [])]
         ),
     }
+
+
+# --- Overview projections ---------------------------------------------------
+#
+# Both payloads are mostly device identifiers, timestamps and duplicated nesting.
+# The full versions remain one call away in `get_training_status` and
+# `get_training_readiness`; what an overview needs is the handful of numbers a
+# coach would open with.
+
+def _first_device(mapping) -> dict:
+    """Garmin keys several of these blocks by device id. Take the one device."""
+    if not isinstance(mapping, dict):
+        return {}
+    for value in mapping.values():
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _summarize_load(load) -> dict | None:
+    if not isinstance(load, dict):
+        return load
+    vo2 = (load.get("mostRecentVO2Max") or {}).get("generic") or {}
+    status = _first_device(
+        (load.get("mostRecentTrainingStatus") or {}).get("latestTrainingStatusData")
+    )
+    acute = status.get("acuteTrainingLoadDTO") or {}
+    balance = _first_device(
+        (load.get("mostRecentTrainingLoadBalance") or {})
+        .get("metricsTrainingLoadBalanceDTOMap")
+    )
+    summary = {
+        "vo2max": vo2.get("vo2MaxPreciseValue") or vo2.get("vo2MaxValue"),
+        "vo2max_date": vo2.get("calendarDate"),
+        "training_status": status.get("trainingStatusFeedbackPhrase"),
+        "acute_load": acute.get("dailyTrainingLoadAcute"),
+        "chronic_load": acute.get("dailyTrainingLoadChronic"),
+        "acwr": acute.get("dailyAcuteChronicWorkloadRatio"),
+        "acwr_status": acute.get("acwrStatus"),
+        "load_aerobic_low": balance.get("monthlyLoadAerobicLow"),
+        "load_aerobic_high": balance.get("monthlyLoadAerobicHigh"),
+        "load_anaerobic": balance.get("monthlyLoadAnaerobic"),
+        "load_balance_verdict": balance.get("trainingBalanceFeedbackPhrase"),
+    }
+    summary = {k: v for k, v in summary.items() if v is not None}
+    low, high = summary.get("load_aerobic_low"), summary.get("load_aerobic_high")
+    if low is not None and high is not None and high > low:
+        summary["load_balance_reading"] = (
+            "Inverted: more high-aerobic load than low-aerobic. Both the "
+            "pyramidal and polarized models require the opposite — the easy "
+            "sessions are being run too hard."
+        )
+    return summary
+
+
+def _summarize_readiness(readiness) -> dict | None:
+    entry = readiness[0] if isinstance(readiness, list) and readiness else readiness
+    if not isinstance(entry, dict):
+        return readiness
+    fields = (
+        "calendarDate", "score", "level", "feedbackShort",
+        "sleepScore", "sleepScoreFactorFeedback",
+        "hrvFactorPercent", "hrvFactorFeedback",
+        "recoveryTimeFactorPercent", "acuteLoadFactorFeedback",
+        "stressHistoryFactorPercent",
+    )
+    summary = {k: entry.get(k) for k in fields if entry.get(k) is not None}
+    summary["caveat"] = (
+        "A single day's composite score is not a verdict — no wearable "
+        "composite has independent validation as an absolute. Call "
+        "get_recovery_trend before acting on it."
+    )
+    return summary
 
 
 @mcp.tool()
@@ -96,17 +180,17 @@ async def get_metric_trend(
     client = get_garmin(ctx)
 
     method_map = {
-        "steps": ("get_steps_data", lambda d: d),
-        "sleep_score": ("get_sleep_data", lambda d: d),
-        "hrv": ("get_hrv_data", lambda d: d),
-        "stress": ("get_stress_data", lambda d: d),
-        "heart_rate": ("get_heart_rates", lambda d: d),
+        "steps": ("get_steps_data", _steps_value),
+        "sleep_score": ("get_sleep_data", _sleep_value),
+        "hrv": ("get_hrv_data", _hrv_value),
+        "stress": ("get_stress_data", _stress_value),
+        "heart_rate": ("get_heart_rates", _resting_hr_value),
     }
 
     if metric not in method_map:
         return {"error": f"Unknown metric '{metric}'. Choose from: {list(method_map.keys())}"}
 
-    method_name, _ = method_map[metric]
+    method_name, extract = method_map[metric]
     try:
         dates = build_date_list(start_date, end_date)
     except ValueError as exc:
@@ -125,11 +209,35 @@ async def get_metric_trend(
         return_exceptions=True,
     )
 
-    data_points = [
-        {"date": d, "data": r}
-        for d, r in zip(dates, results)
-        if not isinstance(r, Exception)
-    ]
+    # One number per day, not the day's whole payload. Asked for 30 days of
+    # sleep scores, this used to return 1.9 million characters: every day
+    # carried per-minute `sleepLevels`, `sleepMovement` and `remSleepData`
+    # arrays, none of which is a trend.
+    data_points = []
+    for d, r in zip(dates, results):
+        if isinstance(r, BaseException):
+            continue
+        value = extract(r)
+        # A day Garmin answers for but holds nothing on comes back as an empty
+        # payload, not an error. Counting those as covered is how a window that
+        # is a third empty reports "30 of 30 successful days" — and any mean
+        # taken over it is wrong.
+        if value is None:
+            continue
+        data_points.append({"date": d, "value": value})
+
+    values = [p["value"] for p in data_points]
+    stats: dict = {}
+    if values:
+        best = max(data_points, key=lambda p: p["value"])
+        worst = min(data_points, key=lambda p: p["value"])
+        stats = {
+            "mean": round(sum(values) / len(values), 1),
+            "min": min(values),
+            "max": max(values),
+            "best_day": best["date"],
+            "worst_day": worst["date"],
+        }
 
     return {
         "metric": metric,
@@ -137,8 +245,60 @@ async def get_metric_trend(
         "end_date": end_date,
         "data_points": data_points,
         "total_days": len(dates),
-        "successful_days": len(data_points),
+        # Days that actually carried a value, which is not the same as days
+        # Garmin answered for.
+        "days_with_data": len(data_points),
+        "days_without_data": len(dates) - len(data_points),
+        **stats,
+        "note": (
+            "For stress and heart rate a lower 'best_day' is the good one; the "
+            "labels are extremes, not judgements."
+        ),
     }
+
+
+# --- Per-metric value extraction -------------------------------------------
+#
+# Each Garmin metric buries its one interesting number at a different depth, and
+# a trend wants the number rather than the payload it arrived in. Returning None
+# means the day holds no value — which is different from the call having failed.
+
+def _steps_value(payload):
+    if isinstance(payload, list):
+        total = sum(d.get("steps") or 0 for d in payload if isinstance(d, dict))
+        return total or None
+    if isinstance(payload, dict):
+        return payload.get("totalSteps") or payload.get("steps") or None
+    return None
+
+
+def _sleep_value(payload):
+    if not isinstance(payload, dict):
+        return None
+    dto = payload.get("dailySleepDTO") or {}
+    scores = (dto.get("sleepScores") or {}).get("overall") or {}
+    return scores.get("value")
+
+
+def _hrv_value(payload):
+    if not isinstance(payload, dict):
+        return None
+    summary = payload.get("hrvSummary") or {}
+    return summary.get("lastNightAvg") or summary.get("weeklyAvg")
+
+
+def _stress_value(payload):
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("avgStressLevel")
+    # Garmin uses -1 and -2 for "not worn" and "no data".
+    return value if isinstance(value, (int, float)) and value >= 0 else None
+
+
+def _resting_hr_value(payload):
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("restingHeartRate")
 
 
 @mcp.tool()
@@ -167,7 +327,18 @@ async def suggest_recovery(date_str: str, ctx: Context) -> dict:
             "body_battery": battery,
             "training_readiness": readiness,
         },
-        "note": "Use the readiness score and HRV status to determine: <25 = rest, 25-50 = easy, 50-75 = normal, 75+ = push",
+        "note": (
+            "Do not read today's score as a verdict. No wearable composite "
+            "score — readiness, Body Battery — has independent peer-reviewed "
+            "validation as an absolute number; they are trend instruments. "
+            "Three consecutive low mornings is a signal, one is not. Call "
+            "get_recovery_trend for the trend, and weigh sleep first: under 7 "
+            "hours a night is associated with roughly 51% higher injury risk "
+            "in endurance athletes, which is a larger and better-evidenced "
+            "effect than any single-day readiness number. Bias toward keeping "
+            "the planned session; a plan rewritten every time a score dips is "
+            "not a plan."
+        ),
     }
 
 
@@ -218,14 +389,65 @@ async def get_weekly_comparison(metric: str, reference_date: str, ctx: Context) 
             asyncio.gather(*[client.call(method_name, d, ttl=HEALTH_TTL) for d in curr_dates], return_exceptions=True),
             asyncio.gather(*[client.call(method_name, d, ttl=HEALTH_TTL) for d in prior_dates], return_exceptions=True),
         )
-        curr_data = [{"date": d, "data": r} for d, r in zip(curr_dates, curr_results) if not isinstance(r, Exception)]
-        prior_data = [{"date": d, "data": r} for d, r in zip(prior_dates, prior_results) if not isinstance(r, Exception)]
+        extract = _EXTRACTORS[metric]
+        curr_data = _daily_values(curr_dates, curr_results, extract)
+        prior_data = _daily_values(prior_dates, prior_results, extract)
 
-    return {
+    result = {
         "metric": metric,
         "current_week": {"start": curr_start, "end": curr_end, "data": curr_data},
         "prior_week": {"start": prior_start, "end": prior_end, "data": prior_data},
     }
+
+    # The docstring has always promised a delta summary. Returning both weeks'
+    # raw payloads and leaving the subtraction to the reader is not one, and it
+    # is how this call came to cost 318,000 characters to deliver fourteen
+    # numbers.
+    curr_values = [d["value"] for d in curr_data if isinstance(d.get("value"), (int, float))]
+    prior_values = [d["value"] for d in prior_data if isinstance(d.get("value"), (int, float))]
+    if curr_values and prior_values:
+        curr_mean = sum(curr_values) / len(curr_values)
+        prior_mean = sum(prior_values) / len(prior_values)
+        result["delta"] = {
+            "current_mean": round(curr_mean, 1),
+            "prior_mean": round(prior_mean, 1),
+            "change": round(curr_mean - prior_mean, 1),
+            "percent_change": (
+                round((curr_mean - prior_mean) / prior_mean * 100, 1)
+                if prior_mean else None
+            ),
+            "current_days_with_data": len(curr_values),
+            "prior_days_with_data": len(prior_values),
+        }
+    else:
+        result["delta"] = None
+        result["delta_note"] = (
+            "Not enough data in one or both weeks to compare. Say so rather "
+            "than reading a partial week as a decline."
+        )
+    return result
+
+
+_EXTRACTORS = {
+    "steps": _steps_value,
+    "sleep_score": _sleep_value,
+    "hrv": _hrv_value,
+    "stress": _stress_value,
+    "heart_rate": _resting_hr_value,
+}
+
+
+def _daily_values(dates, results, extract) -> list[dict]:
+    """One {date, value} per day that actually holds a value."""
+    out = []
+    for d, r in zip(dates, results):
+        if isinstance(r, BaseException):
+            continue
+        value = extract(r)
+        if value is None:
+            continue
+        out.append({"date": d, "value": value})
+    return out
 
 
 @mcp.tool()

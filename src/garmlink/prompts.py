@@ -61,6 +61,65 @@ Then report against what the plan actually prescribes:
 - Use the zones in the plan. They are the athlete's own measured numbers, and
   they are more current than anything inferred.
 
+The plan document arrives as several files joined together — the block changes
+weekly, the reference rarely, the log only grows. Read it as one document;
+`update_training_plan` writes one part at a time, using that part's own `sha`
+from the `parts` list.
+
+**What makes training effective, in order of how much it moves a result.** This
+comes first deliberately. Everything below it is about not going backwards, and a
+report that leads with limits produces plans that are safe and under-dosed.
+
+- **Weekly volume** — for running, the strongest modifiable predictor of race
+  time. Weekly distance with BMI and VO2max explains roughly 63% of the variation
+  between runners. Call `get_session_counts`, which reports it per week.
+- **Long session length** — a long run over 13 miles associates with faster half
+  marathons and less second-half pace decay.
+- **Frequency** — four to five run days beats three at matched volume, and is
+  what makes the volume reachable at all.
+- **Intensity distribution** — roughly 80/20, easy genuinely easy. Check it with
+  `get_intensity_distribution` rather than assuming intent matched execution.
+- **Race-pace specificity in the final third** of a block.
+
+**Volume below target is a finding about the plan, not the athlete**, and the
+response is to raise the prescription. Higher volume and longer long runs
+associate with faster times *and* with no increase in injury risk, so risk is
+never a reason to prescribe less by default. Reduce volume when
+`get_recovery_trend` says to, not pre-emptively.
+
+**Never judge what the athlete is capable of from training volume.** Before any
+claim that a goal is or is not reachable — a race time, a distance, a date — call
+`get_race_predictions` and read VO2max. Volume says what was recently done;
+those say what the body can currently do, and in a sparse logging period the two
+diverge hard. Sparse logging is usually a busy life, not lost fitness.
+
+Keep two questions separate, because they have different evidence and merging
+them produces confident nonsense:
+
+- *How fast may training increase?* — the trailing-30-day session rule,
+  `get_progression_check`. A safe rate of increase.
+- *What is achievable by race day?* — race predictions, VO2max, best recent
+  efforts. A capability ceiling.
+
+The ramp figure must never be extrapolated forward to argue a goal is out of
+reach. This is not hypothetical: a 2.06mi trailing long run was once read as
+proof that a half marathon fourteen weeks out needed a run/walk finish, on a day
+Garmin predicted 1:54. The arithmetic was right and the premise was wrong. When
+a goal sits between the durability floor and the fitness ceiling, that is a
+training problem to solve, not an impossibility to report.
+
+**Measure adherence before judging anything.** Call `get_session_counts` and
+compare it against the weekly template. A prescription and a record of training
+are different things, and this athlete's have diverged far enough that reading
+the plan alone gives the wrong answer — recent windows have run at roughly a
+fifth of what was written down. Lead with what was actually done. If the gap is
+large, the finding is that the week is mis-scoped, not that the athlete failed:
+say so plainly, once, without lecturing.
+
+Every lookback also has a horizon. Garmin holds nothing from before the device
+was first used and answers a longer window with less data rather than an error,
+so quote the window the tools report as covered, never the one requested.
+
 If `get_training_plan` returns an error, say so in one line and continue on
 Garmin data alone. Do not substitute an assumption for what the plan would have
 said.
@@ -382,21 +441,52 @@ answered is "am I building sustainably, or am I about to get hurt?"
 
 ## How to read it
 
-**Acute:chronic ratio** — acute load divided by chronic load:
+Read these in order. The order is the point: the first two have better evidence
+behind them than the third, and leading with the ratio is how a genuinely risky
+week gets called fine because one number sat in its band.
+
+**Sleep — first.** Call `get_recovery_trend`. Under 7 hours a night is associated
+with roughly 51% higher injury risk in endurance athletes, and poorer sleep
+quality with about 36% more running injuries in recreational runners. That is a
+larger and better-supported effect than any load metric here. Report nights under
+7h in the last 7, not the average — the effect is a threshold, and 8h and 6h
+average to a passing 7h while being nothing alike. Three or more short nights in
+the last seven holds a progression on its own, whatever the load says.
+
+**Intensity distribution — second.** Call `get_intensity_distribution`. More
+high-aerobic load than low-aerobic is the signature of easy sessions being run
+too hard, and it stalls a base phase while looking like hard work. This is a more
+common failure than too much total load, and nothing else in this report catches
+it.
+
+**Acute:chronic ratio — third, and as corroboration only.** Acute load over
+chronic load:
 - below 0.8: detraining, or a deliberate taper
 - 0.8 to 1.3: the productive band
 - 1.3 to 1.5: elevated; sustainable only briefly and only if recovery holds
-- above 1.5: spike. This is where injury risk climbs sharply.
+- above 1.5: spike
 
-**Ramp rate** — week-over-week volume increase. Around 10% is the conventional
-ceiling. Report the actual percentage. A jump from a low base is less alarming
-than the same percentage from a high one, so read it against the chronic load
-rather than in isolation.
+Treat these bands as weak. The ratio is mathematically coupled — acute load
+appears in both numerator and denominator — which produces correlation with
+injury that is partly an artefact, and recent meta-analyses find its predictive
+value heavily dependent on how it is computed. Never issue a verdict on the ratio
+alone: it needs a second signal, and it never overrides sleep.
 
-**Corroboration.** A high ratio with stable HRV and a rising VO2max is a hard
-block being absorbed. The same ratio with falling HRV and a flat or falling
-VO2max is overreaching. Say which one this is — that distinction is the entire
-value of this report.
+**Volume against the goal.** Call `get_session_counts` with the plan's weekly
+target. This report has historically only been able to say "too much"; it must
+also be able to say "not enough", which is the more common state for an athlete
+training around a job. A shortfall is a finding about the plan, and the response
+is to raise the prescription — not to lower the goal.
+
+**Progression — the version that has evidence.** Call `get_progression_check`. A
+single session should not exceed roughly 10% beyond the longest of the previous
+30 days. The widely-quoted 10%-per-week *volume* ceiling has no such support;
+do not apply it and do not repeat it.
+
+**Corroboration.** A high ratio with stable HRV, adequate sleep and a rising
+VO2max is a hard block being absorbed. The same ratio with short nights, falling
+HRV and a flat or falling VO2max is overreaching. Say which one this is — that
+distinction is the entire value of this report.
 
 Load is cross-sport: report the combined picture first, then which sport is
 driving it. Do not analyse one sport in isolation.
@@ -637,9 +727,26 @@ Choose exactly one, and name it:
   already on the target day first, and say what the knock-on effect is.
 
 Bias toward **keep**. Readiness scores are noisy, and a plan that gets rewritten
-every time HRV dips is not a plan. Soften or move on a clear signal — poor
-readiness plus a high acute:chronic ratio, or a genuinely bad night before a
-key session — not on a single soft number.
+every time HRV dips is not a plan. Soften or move on a clear signal — not on a
+single soft number.
+
+What counts as a clear signal, in order of weight:
+- Three or more of the last seven nights under 7 hours. Call
+  `get_recovery_trend`; this is the best-evidenced one and it holds a
+  progression on its own.
+- Three consecutive low readiness or HRV mornings. One low morning is not a
+  signal. No wearable composite score has independent peer-reviewed validation
+  as an absolute number — they are trend instruments, and a single reading of 7
+  out of 100 is a data point, not a diagnosis.
+- A pattern of missed sessions. Repeatedly failing the same session means the
+  week is mis-scoped, and the fix is to re-scope the week rather than to soften
+  today's workout again.
+- Poor readiness together with a high acute:chronic ratio, or a genuinely bad
+  night before a key session.
+
+When you do adjust, name the signal in the plan-document note. "Readiness was
+low" is not a reason anyone can check later; "four consecutive nights under five
+hours" is.
 
 ## Before writing anything
 
@@ -753,22 +860,75 @@ calendar.
    roughly 60% of the preceding week's volume — it is not optional, and it is
    where the adaptation actually lands.
 
-3. **Ramp from the measured baseline**, not from the target. Around 10% total
-   volume per week is the ceiling. Check the resulting run volume against
-   `get_running_tolerance` where it is populated — if the plan exceeds it, cut
-   the run volume and put the hours on the bike, which absorbs load at far lower
-   injury cost.
+3. **Ramp from the measured baseline**, not from the target, and cap the
+   ramp per SESSION rather than per week. Call `get_progression_check`: no long
+   session exceeds roughly 10% beyond the longest of the previous 30 days. That
+   is the form of the rule with cohort evidence behind it. The 10%-per-week
+   volume ceiling is a myth with no supporting evidence — do not apply it. Below
+   about 5 miles, step by a fixed half mile instead: 10% of two miles is 350
+   yards, and the evidence comes from runners with real mileage. A cutback week
+   does not reset the anchor. Check the result against `get_running_tolerance`
+   where it is populated — if the plan exceeds it, cut the run volume and put
+   the hours on the bike, which absorbs load at far lower injury cost.
 
-4. **Weekly shape.** Most of the week is easy aerobic work — roughly 80% of
-   volume in zones 1-2, with the hard days genuinely hard. Two easy days either
-   side of every hard day. One long session per week, usually the bike.
+4. **Check that the block can actually be executed.** Call
+   `get_session_counts` and compare it against the plan's weekly template before
+   designing anything. A block prescribing ten sessions to someone completing two
+   is not an ambitious block, it is a fiction: nobody can predict which fifth
+   lands, so no progression can be built on it. Prescribe close to what is
+   actually being done, ordered by priority, and name the sessions that are
+   optional as optional. A smaller week that happens beats a larger one that does
+   not.
+
+5. **Gate the ramp on recovery.** Call `get_recovery_trend`. A planned
+   progression is a ceiling that applies only when recovery supports it. With
+   three or more of the last seven nights under 7 hours, hold volume at the
+   previous week's level and repeat the week — do not rewrite the block. Under
+   7 hours a night carries roughly 51% higher injury risk in endurance athletes,
+   which dwarfs the gain from one more week of build.
+
+   Non-training stress is load. A sustained run above the athlete's own baseline
+   is not a neutral backdrop to a build week; treat it the way added training
+   load would be treated.
+
+6. **Weekly shape.** Most of the week is easy aerobic work, with the hard days
+   genuinely hard. Match the shape to the athlete and the phase rather than
+   defaulting to polarized: for a RECREATIONAL athlete a pyramidal distribution
+   — most easy, then moderate, least hard — is at least as well supported as
+   polarized and generally better, with polarized reserved for the final
+   race-specific block and for well-trained athletes. Sequencing pyramidal into
+   polarized outperforms either alone. Call `get_intensity_distribution` to see
+   what is actually happening: more high-aerobic than low-aerobic load means the
+   easy sessions are being run too hard, and that is the fault to fix before
+   adding any intensity.
+
+   Two easy days either side of every hard day. One long session per week.
    Include at least one brick if bike and run volume both support it.
+
+7. **Strength, and how it sits against the running.** Two sessions a week of
+   heavy, brief, low-rep work on few compound lifts — 15 to 25 minutes, not an
+   hour. That is the dose that improves running economy; hypertrophy splits of
+   eight exercises at 2x6-8 are a different stimulus at several times the time
+   cost, and they are the first thing to get skipped.
+
+   Strength is the strongest injury-prevention lever available, at roughly 50%
+   injury reduction and dose-responsive. When asked how to stay healthy, reach
+   for strength, sleep and a gentler ramp. Do NOT reach for stretching: static
+   stretching shows no effect on all-cause injury in a meta-analysis of over
+   9,000 participants. Mobility work is worth keeping for range of motion and
+   comfort — the plan schedules a block after most sessions — but never present
+   it as injury prevention, and never let it substitute for a strength session.
+
+   Sequencing: put endurance before strength on a shared day, or separate them
+   by at least 3 hours. Never put heavy lower-body work within 8 hours BEFORE a
+   quality run — lifting degrades running economy for that long. Best of all,
+   give strength its own day.
 
    Mark each bike session indoor or outdoor. For the indoor ones, name a
    confirmed current Zwift workout rather than creating a Garmin workout — see
    the Zwift section below. Only the outdoor rides go through `create_workout`.
 
-5. **Swimming.** Read where the plan has the swim before prescribing one — the
+8. **Swimming.** Read where the plan has the swim before prescribing one — the
    right dose for someone starting out is not the right dose for someone already
    swimming weekly, and the plan says which this is. If swimming is new or only
    recently started, build it in deliberately:
@@ -786,7 +946,16 @@ calendar.
      stroke exist. Once the plan shows the swim as established, ramp it like any
      other sport.
 
-6. **Present the whole block before writing anything.** Week by week, with
+9. **Check the block against its own goal before presenting it.** Add up the
+   weekly running volume the block actually prescribes and compare it to what the
+   target time needs — under 20 mi/wk is under-dosed for a half-marathon time
+   goal, and 30-40 mi/wk is normal for the distance. If the block does not get
+   there, say so explicitly and either raise it or state plainly that the goal
+   time is not supported by the volume on offer. Presenting an under-dosed block
+   as finished is the failure this step exists to catch: a previous block peaked
+   at 18.5 mi/wk against an 8:30/mi goal and nothing flagged it.
+
+10. **Present the whole block before writing anything.** Week by week, with
    total hours and the session list per week. Wait for an explicit yes.
 
 7. Only after they confirm: call `create_workout` for each session that needs a
