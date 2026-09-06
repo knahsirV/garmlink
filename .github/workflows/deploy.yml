@@ -62,6 +62,14 @@ jobs:
           ALLOW_UNAUTHENTICATED: '1'
         run: python tests/test_prompts.py
 
+      # The icon is a base64 blob nothing regenerates, so a truncated paste or
+      # a stale re-encode would only surface as a broken image in a client.
+      - name: Server icon payload
+        env:
+          GARMIN_EMAIL: test@example.invalid
+          ALLOW_UNAUTHENTICATED: '1'
+        run: python tests/test_icon.py
+
       # The previous create_workout shipped malformed Garmin payloads for months
       # precisely because nothing exercised it. Keep that covered in CI.
       - name: Workout builder payload shape

@@ -66,5 +66,12 @@ def test_server_declares_the_icon() -> None:
 if __name__ == "__main__":
     test_icon_is_a_valid_png()
     test_declared_sizes_match_the_payload()
-    print("icon: valid PNG, sizes agree")
-    print("(server declaration check needs the fastmcp env; run under pytest)")
+    print("icon: valid PNG, declared sizes agree")
+    try:
+        test_server_declares_the_icon()
+    except ImportError as e:
+        # Payload checks are stdlib-only and still ran; only the server
+        # construction needs the installed env.
+        print(f"skipped server declaration check (no fastmcp env): {e}")
+    else:
+        print("server declares the icon")
