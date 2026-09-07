@@ -50,8 +50,9 @@ _cache = TTLCache()
 
 # The document is split by volatility: the block changes weekly, the reference
 # rarely, the log only ever grows. They are concatenated in this order on read,
-# which matters to the PWA — render.js takes the *first* table matching a set of
-# column names, so the current block's tables must come before the reference's.
+# which matters to the PWA — findTable() in its src/plan.js takes the *first*
+# table matching a set of column names, so the current block's tables must come
+# before the reference's.
 _DEFAULT_PATHS = "content/plan.md,content/reference.md,content/log.md"
 
 _API = "https://api.github.com"
@@ -228,18 +229,21 @@ def validate_plan_update(
             )
 
 
-# The PWA renders the plan with a hand-rolled markdown subset (`render.js` in the
-# training-plan repo) that covers h1-h4, bold, italic, inline code, pipe tables,
-# '-' lists, '---' and paragraphs — and nothing else. Anything below renders as
-# literal text on the phone. These warn rather than block: garmlink should not
-# hard-fail on another repo's renderer, and the right fix is sometimes to extend
-# render.js instead.
+# The plan is plain markdown by contract: headings, bold, italic, inline code,
+# pipe tables, '-' lists, '---' and paragraphs. The PWA parses with marked, so
+# the constructs below now parse — the contract is no longer enforced by what
+# the renderer cannot do, which is exactly why these checks matter more than
+# they used to.
+#
+# The PWA renders every block it is given rather than dropping any, so none of
+# these makes content vanish. What they cost is listed per line. These warn
+# rather than block: garmlink should not hard-fail on another repo's renderer.
 _RENDER_CHECKS: tuple[tuple[str, str], ...] = (
-    (r"^\s*\d+[.)]\s+\S", "ordered list — renders as literal '1.' text"),
-    (r"^\s*>", "blockquote — renders as literal '&gt;' text"),
-    (r"^\s*```", "fenced code block — renders as literal backticks"),
-    (r"^\s+-\s+\S", "nested list — renders flattened into the parent list"),
-    (r"\[[^\]]+\]\([^)]+\)", "link — renders as literal '[text](url)' text"),
+    (r"^\s*\d+[.)]\s+\S", "ordered list — renders, but the contract is '-' lists"),
+    (r"^\s*>", "blockquote — renders unstyled; the theme has no rule for it"),
+    (r"^\s*```", "fenced code block — renders unstyled and can overflow on a phone"),
+    (r"^\s+-\s+\S", "nested list — renders, but the contract is flat lists"),
+    (r"\[[^\]]+\]\([^)]+\)", "link — the URL is DROPPED; only the link text is shown"),
 )
 
 
@@ -541,9 +545,10 @@ async def update_training_plan(
     if warnings:
         result["render_warnings"] = warnings
         result["render_note"] = (
-            "The plan was written. These lines use markdown the training-plan "
-            "PWA cannot render and will show as literal text on the phone — "
-            "either rewrite them in the supported subset (headings, bold, "
-            "italic, inline code, tables, '-' lists, '---') or extend render.js."
+            "The plan was written. These lines stray outside the plan's "
+            "plain-markdown contract (headings, bold, italic, inline code, "
+            "tables, '-' lists, '---'). Nothing is lost on the phone except a "
+            "link's URL, which is dropped — the link text alone is shown. "
+            "Rewrite them in the supported subset, putting any URL in prose."
         )
     return result

@@ -564,7 +564,7 @@ def test_every_part_is_returned_with_its_own_sha():
 
 
 def test_parts_are_joined_in_configured_order():
-    """render.js takes the FIRST table matching a set of column names, so the
+    """findTable() takes the FIRST table matching a set of column names, so the
     block's tables have to precede the reference's. Order is the contract."""
     with _http(_split_script()):
         result = asyncio.run(plan.get_training_plan())
