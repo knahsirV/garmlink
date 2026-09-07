@@ -95,6 +95,13 @@ jobs:
           ALLOW_UNAUTHENTICATED: '1'
         run: python tests/test_coaching.py
 
+      # A casual "swap today's workout" request never goes through the
+      # adapt_plan prompt, and the workout tools never touch the plan
+      # document — this resident string is the only thing standing between
+      # that request and a Garmin-side change nothing else remembers.
+      - name: Resident instructions link Garmin writes back to the plan
+        run: python tests/test_instructions.py
+
   deploy:
     needs: test
     runs-on: ubuntu-latest

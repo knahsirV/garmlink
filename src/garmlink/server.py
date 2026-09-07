@@ -177,6 +177,17 @@ to reason, never to edit the document.
 
 **Writes wait.** Every tool that changes a workout, the calendar or the plan
 document shows the change and waits for an explicit yes first.
+
+**A Garmin-side change is invisible to the plan.** `schedule_workout`,
+`unschedule_workout`, `create_workout` and `update_workout` only ever touch the
+Garmin calendar — nothing wires them to the plan document, and most requests to
+change a workout arrive as an ordinary ask ("swap today's run") rather than
+through the `adapt_plan` prompt that has this step built in. So after a calendar
+change is applied, check it against the plan's current block and weekly
+template; if it departs from what the plan says, offer to record it with
+`update_training_plan` as a **separate** step with its own explicit yes — the
+plan write is a second write to a second system, not implied by the calendar
+confirmation. Skip the offer only when the change matches the plan already.
 """
 
 mcp = FastMCP(
