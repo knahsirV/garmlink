@@ -69,8 +69,8 @@ checking CI + the Docker image (both 3.12).
   **This module deliberately does not parse the plan** (`plan.py:151`). It
   hardcodes no heading, section or table name, so the document can be
   reorganised without touching the server — a validator that knew the shape
-  would need editing every time the shape changed. `render.js` in the sister repo
-  is the only structural consumer.
+  would need editing every time the shape changed. `src/plan.js` in the sister
+  repo is the only structural consumer.
 - `auth_provider.py` / `auth.py` / `tokens.py` — GitHub OAuth for connector
   users; Garmin token storage (Firestore in prod, file locally).
 
